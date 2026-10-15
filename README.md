@@ -40,9 +40,10 @@ npm run build:all
 - `src/<platform>/plugins` 与 `src/<platform>/cua_node` 是 Browser / Computer Use 等外置运行时的补丁目标；直打包流程会显式覆盖这两个目录，避免重新复制上游安装包缓存时丢失补丁。
 - `patch-browser-auth.js` 兼容 API-key 登录：ChatGPT 身份与 request-header 策略可用时保持原行为；身份读取失败时仅关闭该可选请求头并继续本地浏览器通道，不会把 API key 伪装或发送为 ChatGPT token。
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
-- `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择官方强调色预设；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，使首页入口按官方读取逻辑恢复当前会话；ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
 - `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
-- `patch-reading-layout.js` 在外观主题卡片中加入默认、85%、100% 三档正文宽度，并同步代码块、表格和输入区宽度，扩宽适用对话框；Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
+- `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
 - `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
 - `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
 - `patch-updater.js` 区分更新方法与调用 Bundle，并在补丁后核对更新方法确实返回禁用状态；缺少目标或结构未知不再误报为已关闭。

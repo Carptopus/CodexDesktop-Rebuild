@@ -1,5 +1,11 @@
 // 只保存阅读布局与 Markdown 粗体样式偏好，认证、Provider 与任务配置由原程序管理。
-export const WIDTHS = ["default", "85", "100"];
+export const MIN_WIDTH_PERCENT = 50;
+export const MAX_WIDTH_PERCENT = 100;
+export const WIDTH_STEP = 5;
+export const WIDTHS = Array.from(
+  { length: (MAX_WIDTH_PERCENT - MIN_WIDTH_PERCENT) / WIDTH_STEP + 1 },
+  (_, index) => String(MIN_WIDTH_PERCENT + index * WIDTH_STEP),
+);
 export const STORAGE_KEY = "codex-rebuild:reading-width:v1";
 export const BOLD_COLOR_MODES = ["default", "accent", "custom"];
 export const BOLD_MODE_STORAGE_KEY = "codex-rebuild:markdown-bold-color-mode:v1";
@@ -15,7 +21,7 @@ export function readingCss(value, boldMode = "default", customColor = DEFAULT_BO
   if (boldMode === "custom" && !COLOR_PATTERN.test(customColor)) throw new Error("Markdown 粗体自定义颜色无效");
   const expanded = `min(100%,max(48rem,${value}%))`;
   const compact = `min(100%,max(40rem,${value}%))`;
-  const selected = value === "default" ? "" : `html[data-codex-rebuild-reading-width] body{--thread-content-max-width:${expanded};--thread-content-expanded-max-width:${expanded};--thread-content-compact-max-width:${compact}}`;
+  const selected = `html[data-codex-rebuild-reading-width] body{--thread-content-max-width:${expanded};--thread-content-expanded-max-width:${expanded};--thread-content-compact-max-width:${compact}}`;
   const boldSelector = ":is([data-codex-window-type=browser],[data-codex-window-type=chrome-extension],[data-codex-window-type=electron]) [data-selected-text-overlay-target] strong";
   const bold = boldMode === "default" ? "" : `${boldSelector}{color:${boldMode === "accent" ? "var(--app-color-text-accent,var(--codex-base-accent,currentColor))" : customColor.toLowerCase()}}`;
   return `${selected}
@@ -26,8 +32,8 @@ ${Object.entries({ narrow: 520, feature: 600, compact: 640, wide: 800, xwide: 86
 }
 
 function widthPreference() {
-  const value = localStorage.getItem(STORAGE_KEY) ?? "default";
-  return WIDTHS.includes(value) ? value : "default";
+  const value = localStorage.getItem(STORAGE_KEY) ?? String(MIN_WIDTH_PERCENT);
+  return WIDTHS.includes(value) ? value : String(MIN_WIDTH_PERCENT);
 }
 
 function boldModePreference() {
@@ -78,19 +84,29 @@ export function renderReadingWidth(react, ui, Row, intl) {
     ui.jsx(Row, {
       size: "compact",
       label: chinese ? "聊天正文宽度" : "Chat content width",
-      control: ui.jsxs("select", {
-        "aria-label": chinese ? "聊天正文宽度" : "Chat content width",
-        "data-codex-rebuild-width-control": "true",
-        className: controlClass,
-        value,
-        onChange: event => {
-          const next = event.currentTarget.value;
-          localStorage.setItem(STORAGE_KEY, next); apply(next, boldModePreference()); setValue(next);
-          window.dispatchEvent(new Event("codex-rebuild-reading-change"));
-        },
-        children: WIDTHS.map(option => ui.jsx("option", { value: option,
-          children: option === "default" ? (chinese ? "默认" : "Default") : `${option}%` }, option)),
-      }),
+      control: ui.jsxs("div", { className: "flex items-center gap-2", children: [
+        ui.jsx("input", {
+          type: "range",
+          min: MIN_WIDTH_PERCENT,
+          max: MAX_WIDTH_PERCENT,
+          step: WIDTH_STEP,
+          "aria-label": chinese ? "聊天正文宽度" : "Chat content width",
+          "data-codex-rebuild-width-control": "true",
+          className: "w-36",
+          style: { accentColor: "var(--app-color-text-accent)" },
+          value,
+          onChange: event => {
+            const next = event.currentTarget.value;
+            localStorage.setItem(STORAGE_KEY, next); apply(next, boldModePreference()); setValue(next);
+            window.dispatchEvent(new Event("codex-rebuild-reading-change"));
+          },
+        }),
+        ui.jsx("output", {
+          "aria-hidden": "true",
+          className: "w-10 text-right text-sm tabular-nums text-secondary",
+          children: `${value}%`,
+        }),
+      ] }),
     }, "codex-rebuild-reading-width"),
     ui.jsx(Row, {
       size: "compact",
