@@ -4,10 +4,10 @@
  *
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
- * 同时，旧导航模式不会把“当前会话已经属于首页”视为已到达目标，随后又拒绝
- * departedAt 为空的当前记录，最终让首页按钮落到空路由。
- * 这里只放行 apikey 的写入和当前首页短路，不开启这些 ChatGPT 账户能力，
- * 也不改变其他认证方式。
+ * 同时，旧导航模式不会把“当前会话已经属于首页”视为已到达目标，最终让
+ * 首页按钮落到空路由。这里只允许非根路径的 API-key 当前会话短路；根路径
+ * 仍须继续执行官方落地页导航，避免空数据启动停在没有页面组件的 `/`。
+ * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -124,9 +124,18 @@ function returnsTrue(statement) {
 }
 
 function memberName(node) {
+  if (node?.type === "ChainExpression") node = node.expression;
   if (node?.type !== "MemberExpression") return null;
   if (!node.computed && node.property.type === "Identifier") return node.property.name;
   return literal(node.property);
+}
+
+function memberRoot(node) {
+  let current = node;
+  while (current?.type === "MemberExpression" || current?.type === "ChainExpression") {
+    current = current.type === "ChainExpression" ? current.expression : current.object;
+  }
+  return current?.type === "Identifier" ? current.name : null;
 }
 
 function findCurrentHomeGuard(ast) {
@@ -149,13 +158,25 @@ function findCurrentHomeGuard(ast) {
     }, true);
     if (guards.length !== 1) continue;
 
+    const sidebarModeMembers = nodes(guards[0].test,
+      node => node.type === "MemberExpression" && memberName(node) === "sidebarProductMode");
+    if (sidebarModeMembers.length !== 2) continue;
+    const currentLocations = new Set(sidebarModeMembers.map(memberRoot).filter(Boolean));
+    if (currentLocations.size !== 1) continue;
+    const currentLocation = [...currentLocations][0];
+
     const modeChecks = nodes(guards[0].test, node => node.type === "LogicalExpression" &&
       node.operator === "&&" &&
-      (node.left?.type === "Identifier" || isAccountKeyOverride(node.left, accountKey)) &&
+      (node.left?.type === "Identifier" ||
+        isAccountKeyOverride(node.left, accountKey, currentLocation)) &&
       node.right?.type === "BinaryExpression" && ["!=", "!=="].includes(node.right.operator) &&
       literal(node.right.right) === null);
     if (modeChecks.length !== 1) continue;
-    candidates.push({ accountKey, gate: modeChecks[0].left });
+    candidates.push({
+      accountKey,
+      currentLocation,
+      gate: modeChecks[0].left,
+    });
   }
   if (candidates.length > 1) {
     throw new Error(`当前首页短路 数量异常（${candidates.length}）`);
@@ -171,12 +192,18 @@ function isApiKeyOverride(node, authMethod) {
     literal(comparison.right) === "apikey";
 }
 
-function isAccountKeyOverride(node, accountKey) {
+function isAccountKeyOverride(node, accountKey, currentLocation) {
   if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
-  const comparison = node.right;
-  return comparison?.type === "BinaryExpression" && ["===", "=="].includes(comparison.operator) &&
-    comparison.left?.type === "Identifier" && comparison.left.name === accountKey &&
-    literal(comparison.right) === "auth:apikey";
+  const override = node.right;
+  if (override?.type !== "LogicalExpression" || override.operator !== "&&") return false;
+  const account = override.left;
+  const pathname = override.right;
+  return account?.type === "BinaryExpression" && ["===", "=="].includes(account.operator) &&
+    account.left?.type === "Identifier" && account.left.name === accountKey &&
+    literal(account.right) === "auth:apikey" &&
+    pathname?.type === "BinaryExpression" && ["!==", "!=", "===", "=="].includes(pathname.operator) &&
+    memberName(pathname.left) === "pathname" && memberRoot(pathname.left) === currentLocation &&
+    literal(pathname.right) === "/" && ["!==", "!="].includes(pathname.operator);
 }
 
 function patchSource(source) {
@@ -195,7 +222,11 @@ function patchSource(source) {
       return { status: "not-applicable", source };
     }
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const currentHomePatched = isAccountKeyOverride(currentHome.gate, currentHome.accountKey);
+    const currentHomePatched = isAccountKeyOverride(
+      currentHome.gate,
+      currentHome.accountKey,
+      currentHome.currentLocation,
+    );
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
@@ -227,7 +258,7 @@ function patchSource(source) {
       edits.push({
         start: currentHome.gate.start,
         end: currentHome.gate.end,
-        replacement: `(${originalGate}||${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`)`,
+        replacement: `(${originalGate}||${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`&&${currentHome.currentLocation}?.pathname!==\`/\`)`,
       });
     }
     let next = source;

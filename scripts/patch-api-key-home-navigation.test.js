@@ -48,7 +48,7 @@ function restore(source, accountKey, {
   saved = { departedAt: null, location: { pathname: "/local/thread-1" } },
 } = {}) {
   const navigations = [];
-  const current = { hash: "", pathname: currentPath, state: null };
+  const current = currentPath == null ? null : { hash: "", pathname: currentPath, state: null };
   const store = {
     get(key) {
       if (key === "wc") return false;
@@ -61,7 +61,7 @@ function restore(source, accountKey, {
     "const wc=`wc`,Ug=`Ug`,lj=`lj`;",
     "const bti=()=>saved;",
     "const sti=location=>({hash:location.hash??``});",
-    "const Ati=(_store,location)=>location.pathname.startsWith(`/local/`)?`home`:null;",
+    "const Ati=(_store,location)=>location.pathname===`/`||location.pathname.startsWith(`/local/`)?`home`:null;",
     "const ym=location=>location.pathname;",
     source,
     "return Sti(store,{accountKey,area:`home`,navigate,productMode:`codex`});",
@@ -76,6 +76,28 @@ test("API-key 旧导航模式下点击首页保持当前会话", () => {
   assert.ok(result.source.includes(CURRENT_HOME_MARKER));
   assert.equal(restored.value, true);
   assert.deepEqual(restored.navigations, []);
+});
+
+test("API-key 根路径不短路，保留官方空数据落地页导航", () => {
+  const result = patchSource(fixture());
+  const restored = restore(result.source, "auth:apikey", {
+    currentPath: "/",
+    saved: null,
+  });
+
+  assert.equal(restored.value, true);
+  assert.deepEqual(restored.navigations, ["/"]);
+});
+
+test("API-key 尚无当前路由时不访问空对象", () => {
+  const result = patchSource(fixture());
+  const restored = restore(result.source, "auth:apikey", {
+    currentPath: null,
+    saved: null,
+  });
+
+  assert.equal(restored.value, true);
+  assert.deepEqual(restored.navigations, ["/"]);
 });
 
 test("ChatGPT 旧导航模式不获得当前首页短路", () => {
