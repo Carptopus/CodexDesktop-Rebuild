@@ -1,0 +1,9 @@
+packages:
+  - '.'
+
+# Windows packaging reuses the official runtime and native modules.
+# Both local checks and CI packaging work without dependency build scripts.
+ignoredBuiltDependencies:
+  - better-sqlite3
+  - electron
+  - node-pty

@@ -45,3 +45,12 @@ resources/bin/
 resources/codex
 resources/codex.exe
 .claude/
+
+# Local tools, upstream packages, candidates and isolated acceptance data
+7-Zip/
+.cache/
+artifacts/
+/acceptance/
+
+# Private maintenance documents and machine-local tools; never commit
+/local/
