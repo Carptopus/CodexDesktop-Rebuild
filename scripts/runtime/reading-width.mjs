@@ -26,6 +26,11 @@ export function readingCss(value, boldMode = "default", customColor = DEFAULT_BO
   const bold = boldMode === "default" ? "" : `${boldSelector}{color:${boldMode === "accent" ? "var(--app-color-text-accent,var(--codex-base-accent,currentColor))" : customColor.toLowerCase()}}`;
   return `${selected}
 [data-selected-text-overlay-target]{--markdown-wide-block-max-width:100%}
+[data-codex-rebuild-width-control]{appearance:none;width:9rem;height:1.25rem;cursor:pointer;background:transparent;color:inherit}
+[data-codex-rebuild-width-control]::-webkit-slider-runnable-track{height:.25rem;border-radius:9999px;background:linear-gradient(to right,var(--app-color-text-accent,var(--codex-base-accent,#2f6fda)) 0 var(--codex-rebuild-width-progress),color-mix(in srgb,currentColor 18%,transparent) var(--codex-rebuild-width-progress) 100%);box-shadow:inset 0 0 0 1px color-mix(in srgb,currentColor 12%,transparent)}
+[data-codex-rebuild-width-control]::-webkit-slider-thumb{appearance:none;width:1rem;height:1rem;margin-top:-.375rem;border:2px solid var(--color-background-primary,var(--color-background-surface,Canvas));border-radius:9999px;background:var(--app-color-text-accent,var(--codex-base-accent,#2f6fda));box-shadow:0 0 0 1px color-mix(in srgb,currentColor 18%,transparent)}
+[data-codex-rebuild-width-control]:focus-visible{outline:2px solid var(--app-color-text-accent,var(--codex-base-accent,#2f6fda));outline-offset:2px;border-radius:9999px}
+[data-codex-rebuild-width-control]:disabled{cursor:not-allowed;opacity:.5}
 ${bold}
 ${Object.entries({ narrow: 520, feature: 600, compact: 640, wide: 800, xwide: 860, xxwide: 1040, editor: 800, default: 720 }).map(([name, size]) => `.codex-dialog.codex-rebuild-dialog-${name}{width:min(${size}px,calc(100vw / var(--codex-window-zoom,1) - 32px));max-width:calc(100vw / var(--codex-window-zoom,1) - 32px)}`).join("\n")}
 `;
@@ -93,7 +98,10 @@ export function renderReadingWidth(react, ui, Row, intl) {
           "aria-label": chinese ? "聊天正文宽度" : "Chat content width",
           "data-codex-rebuild-width-control": "true",
           className: "w-36",
-          style: { accentColor: "var(--app-color-text-accent)" },
+          style: {
+            accentColor: "var(--app-color-text-accent)",
+            "--codex-rebuild-width-progress": `${(Number(value) - MIN_WIDTH_PERCENT) / (MAX_WIDTH_PERCENT - MIN_WIDTH_PERCENT) * 100}%`,
+          },
           value,
           onChange: event => {
             const next = event.currentTarget.value;

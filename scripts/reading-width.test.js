@@ -55,5 +55,17 @@ test("外观设置使用范围滑杆并将无效旧值回落到 50%", async () =
   assert.equal(slider.props.max, 100);
   assert.equal(slider.props.step, 5);
   assert.equal(slider.props.value, "50");
+  assert.equal(slider.props.style["--codex-rebuild-width-progress"], "0%");
   assert.equal(output.props.children, "50%");
+});
+
+test("宽度滑杆显示强调色进度、主题轨道和键盘焦点", async () => {
+  const { readingCss } = await readingModule();
+  const css = readingCss("80");
+
+  assert.match(css, /\[data-codex-rebuild-width-control\]::\-webkit-slider-runnable-track/);
+  assert.match(css, /linear-gradient\(to right,var\(--app-color-text-accent/);
+  assert.match(css, /color-mix\(in srgb,currentColor 18%,transparent\)/);
+  assert.match(css, /\[data-codex-rebuild-width-control\]:focus-visible/);
+  assert.match(css, /\[data-codex-rebuild-width-control\]:disabled/);
 });

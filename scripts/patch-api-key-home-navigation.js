@@ -3,8 +3,11 @@
  * 补齐 API-key 模式的首页导航记录。
  *
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
- * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入、点击首页落到空路由。
- * 这里只放行 apikey 写入，不开启这些 ChatGPT 账户能力，也不改变其他认证方式。
+ * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
+ * 同时，旧导航模式不会把“当前会话已经属于首页”视为已到达目标，随后又拒绝
+ * departedAt 为空的当前记录，最终让首页按钮落到空路由。
+ * 这里只放行 apikey 的写入和当前首页短路，不开启这些 ChatGPT 账户能力，
+ * 也不改变其他认证方式。
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -12,6 +15,7 @@ const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
+const CURRENT_HOME_MARKER = "/* Codex：API-key 当前首页保持会话。 */";
 const PLATFORMS = ["mac-arm64", "mac-x64", "win", "unix"];
 
 function walk(node, visit, root = node, ownScope = false) {
@@ -112,12 +116,67 @@ function findTracker(ast) {
   return candidates[0] ?? null;
 }
 
+function returnsTrue(statement) {
+  if (statement?.type !== "ReturnStatement") return false;
+  if (literal(statement.argument) === true) return true;
+  return statement.argument?.type === "UnaryExpression" && statement.argument.operator === "!" &&
+    literal(statement.argument.argument) === 0;
+}
+
+function memberName(node) {
+  if (node?.type !== "MemberExpression") return null;
+  if (!node.computed && node.property.type === "Identifier") return node.property.name;
+  return literal(node.property);
+}
+
+function findCurrentHomeGuard(ast) {
+  const candidates = [];
+  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
+    const options = fn.params[1];
+    if (options?.type !== "ObjectPattern") continue;
+    const accountKey = objectBinding(options, "accountKey");
+    const area = objectBinding(options, "area");
+    const productMode = objectBinding(options, "productMode");
+    if (!accountKey || !area || !productMode) continue;
+
+    const guards = nodes(fn, node => {
+      if (node.type !== "IfStatement" || !returnsTrue(node.consequent)) return false;
+      const own = nodes(node.test, () => true);
+      const identifiers = new Set(own.filter(item => item.type === "Identifier")
+        .map(item => item.name));
+      return own.some(item => memberName(item) === "sidebarProductMode") &&
+        identifiers.has(area) && identifiers.has(productMode);
+    }, true);
+    if (guards.length !== 1) continue;
+
+    const modeChecks = nodes(guards[0].test, node => node.type === "LogicalExpression" &&
+      node.operator === "&&" &&
+      (node.left?.type === "Identifier" || isAccountKeyOverride(node.left, accountKey)) &&
+      node.right?.type === "BinaryExpression" && ["!=", "!=="].includes(node.right.operator) &&
+      literal(node.right.right) === null);
+    if (modeChecks.length !== 1) continue;
+    candidates.push({ accountKey, gate: modeChecks[0].left });
+  }
+  if (candidates.length > 1) {
+    throw new Error(`当前首页短路 数量异常（${candidates.length}）`);
+  }
+  return candidates[0] ?? null;
+}
+
 function isApiKeyOverride(node, authMethod) {
   if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
   const comparison = node.right;
   return comparison?.type === "BinaryExpression" && ["===", "=="].includes(comparison.operator) &&
     comparison.left?.type === "Identifier" && comparison.left.name === authMethod &&
     literal(comparison.right) === "apikey";
+}
+
+function isAccountKeyOverride(node, accountKey) {
+  if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
+  const comparison = node.right;
+  return comparison?.type === "BinaryExpression" && ["===", "=="].includes(comparison.operator) &&
+    comparison.left?.type === "Identifier" && comparison.left.name === accountKey &&
+    literal(comparison.right) === "auth:apikey";
 }
 
 function patchSource(source) {
@@ -128,22 +187,53 @@ function patchSource(source) {
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const tracker = findTracker(ast);
-    if (tracker == null) {
-      if (source.includes(MARKER)) throw new Error("补丁标记存在但导航跟踪器结构未知");
+    const currentHome = findCurrentHomeGuard(ast);
+    if (tracker == null || currentHome == null) {
+      if (source.includes(MARKER) || source.includes(CURRENT_HOME_MARKER)) {
+        throw new Error("补丁标记存在但首页导航结构未知");
+      }
       return { status: "not-applicable", source };
     }
-    if (isApiKeyOverride(tracker.gate, tracker.authMethod)) {
+    const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
+    const currentHomePatched = isAccountKeyOverride(currentHome.gate, currentHome.accountKey);
+    if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
-      return { status: "already-patched", source };
-    }
-    if (tracker.gate.type !== "LogicalExpression" || tracker.gate.operator !== "&&" ||
+    } else if (tracker.gate.type !== "LogicalExpression" || tracker.gate.operator !== "&&" ||
       tracker.gate.left?.type !== "Identifier" || tracker.gate.right?.type !== "Identifier") {
       throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
-    const originalGate = source.slice(tracker.gate.start, tracker.gate.end);
-    const replacement = `(${originalGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`;
-    const next = source.slice(0, tracker.gate.start) + replacement + source.slice(tracker.gate.end);
+    if (currentHomePatched) {
+      const gateSource = source.slice(currentHome.gate.start, currentHome.gate.end);
+      if (!gateSource.includes(CURRENT_HOME_MARKER)) {
+        throw new Error("API-key 当前首页逻辑存在但缺少本项目标记");
+      }
+    } else if (currentHome.gate.type !== "Identifier") {
+      throw new Error("当前首页导航模式条件结构未知");
+    }
+    if (trackerPatched && currentHomePatched) return { status: "already-patched", source };
+
+    const edits = [];
+    if (!trackerPatched) {
+      const originalGate = source.slice(tracker.gate.start, tracker.gate.end);
+      edits.push({
+        start: tracker.gate.start,
+        end: tracker.gate.end,
+        replacement: `(${originalGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`,
+      });
+    }
+    if (!currentHomePatched) {
+      const originalGate = source.slice(currentHome.gate.start, currentHome.gate.end);
+      edits.push({
+        start: currentHome.gate.start,
+        end: currentHome.gate.end,
+        replacement: `(${originalGate}||${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`)`,
+      });
+    }
+    let next = source;
+    for (const edit of edits.sort((left, right) => right.start - left.start)) {
+      next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end);
+    }
     parse(next, { ecmaVersion: "latest", sourceType: "module" });
     return { status: "patched", source: next };
   } catch (error) {
@@ -180,13 +270,13 @@ function main() {
       if (target.result.status === "unexpected-shape") throw new Error(target.result.reason);
       console.log(`  [${directory.platform}] ${relPath(target.file.path)}`);
       if (target.result.status === "already-patched") {
-        console.log("    [ok] API-key 首页导航记录已启用");
+        console.log("    [ok] API-key 首页导航记录和当前会话保持已启用");
       } else if (check) {
-        console.log("    [ok] API-key 首页导航写入锚点已核对；dry-run 未写文件");
+        console.log("    [ok] API-key 首页导航写入与当前会话锚点已核对；dry-run 未写文件");
       } else {
         fs.writeFileSync(target.file.path, target.result.source, "utf8");
         patched++;
-        console.log("    [ok] API-key 将使用 auth:apikey 保存并恢复当前会话");
+        console.log("    [ok] API-key 将保存并恢复首页会话，当前会话点击首页保持不变");
       }
     } catch (error) {
       console.error(`  [x] ${directory.platform}: ${error.message}`);
@@ -202,4 +292,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { MARKER, patchSource };
+module.exports = { CURRENT_HOME_MARKER, MARKER, patchSource };
