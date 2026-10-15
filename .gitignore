@@ -5,6 +5,7 @@ Codex.app/
 node_modules/
 
 # Build outputs
+/build/
 out/
 out-*/
 dist/

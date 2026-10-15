@@ -6,6 +6,7 @@ const { parse } = require("acorn");
 const { SRC_DIR } = require("./patch-util");
 const MODULE = "codex-rebuild-reading-width.js";
 const MARKER = "__CodexRebuildReadingWidth";
+const PLACEMENT_MARKER = "/* codex-rebuild-reading-width:visual-card */";
 
 function walk(node, visit) {
   if (!node || typeof node !== "object") return;
@@ -47,7 +48,9 @@ function patchDialogs(source) {
 
 function patchSettings(source) {
   if (source.includes(MARKER)) {
-    if (!source.includes(MODULE) || !source.includes(`jsx)(${MARKER}`)) throw new Error("阅读布局标记不完整");
+    if (!source.includes(MODULE) || !source.includes(`jsx)(${MARKER}`) || !source.includes(PLACEMENT_MARKER)) {
+      throw new Error("阅读布局标记不完整或仍使用旧版卡片外布局");
+    }
     return source;
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -65,6 +68,35 @@ function patchSettings(source) {
   if (arrays.length !== 1 || !states.length || new Set(states).size !== 1) throw new Error("外观设置 React/行结构未知");
   const child = arrays[0].elements.find(element => element?.type === "CallExpression" && element.arguments[1]?.properties?.some(prop => key(prop.key) === "section" && literal(prop.value) === "visual"));
   const jsx = child.callee.expressions.at(-1).object.name;
+  const themeComponent = child.arguments[0]?.name;
+  const themeFunctions = ast.body.filter(node => node.type === "FunctionDeclaration" && node.id?.name === themeComponent);
+  if (themeFunctions.length !== 1) throw new Error("原生主题卡片列表结构未知");
+  const variantCalls = [];
+  walk(themeFunctions[0], node => {
+    if (node.type !== "CallExpression" || node.arguments[0]?.type !== "Identifier" || node.arguments[1]?.type !== "ObjectExpression") return;
+    const names = node.arguments[1].properties.map(prop => key(prop.key));
+    if (["section", "showVariantTitle", "variant"].every(name => names.includes(name))) variantCalls.push(node);
+  });
+  if (variantCalls.length !== 1) throw new Error("原生主题变体组件结构未知");
+  const variantComponent = variantCalls[0].arguments[0].name;
+  const variantFunctions = ast.body.filter(node => node.type === "FunctionDeclaration" && node.id?.name === variantComponent);
+  if (variantFunctions.length !== 1) throw new Error("原生主题设置卡片结构未知");
+  let appearanceProps;
+  walk(variantFunctions[0], node => {
+    if (appearanceProps || node.type !== "VariableDeclarator" || node.id?.type !== "ObjectPattern") return;
+    const entries = Object.fromEntries(node.id.properties.filter(prop => prop.value?.type === "Identifier").map(prop => [key(prop.key), prop.value.name]));
+    if (["section", "showVariantTitle", "variant"].every(name => entries[name])) appearanceProps = entries;
+  });
+  const cardCalls = [];
+  walk(variantFunctions[0], node => {
+    if (node.type !== "CallExpression" || node.arguments[1]?.type !== "ObjectExpression") return;
+    const properties = Object.fromEntries(node.arguments[1].properties.map(prop => [key(prop.key), prop]));
+    if (properties.headerControl && properties.children?.value?.type === "ArrayExpression") cardCalls.push({ node, children: properties.children.value });
+  });
+  if (!appearanceProps || cardCalls.length !== 1) throw new Error("原生主题设置卡片内容结构未知");
+  const cardCallee = cardCalls[0].node.callee.expressions?.at(-1);
+  if (cardCallee?.type !== "MemberExpression" || cardCallee.object?.type !== "Identifier") throw new Error("原生主题设置 JSX 结构未知");
+  const cardJsx = cardCallee.object.name;
   const fonts = ast.body.filter(node => node.type === "FunctionDeclaration" && source.slice(node.start, node.end).includes("settings.appearance.uiFontSize.description"));
   if (fonts.length !== 1) throw new Error("原生设置行结构未知");
   let row;
@@ -83,9 +115,10 @@ function patchSettings(source) {
     }
   });
   if (!row || !intlCalls.length || new Set(intlCalls).size !== 1) throw new Error("原生设置行/语言上下文未知");
-  const at = arrays[0].end - 1;
+  const at = cardCalls[0].children.end - 1;
+  const placement = `,${PLACEMENT_MARKER}${appearanceProps.section}===\`visual\`&&(!${appearanceProps.showVariantTitle}||${appearanceProps.variant}===\`dark\`)&&(0,${cardJsx}.jsx)(${MARKER},{})`;
   const result = `import {renderReadingWidth as __renderCodexReadingWidth} from "./${MODULE}";\n`
-    + source.slice(0, at) + `,(0,${jsx}.jsx)(${MARKER},{})` + source.slice(at)
+    + source.slice(0, at) + placement + source.slice(at)
     + `\nfunction ${MARKER}(){return __renderCodexReadingWidth(${states[0]},${jsx},${row},${intlCalls[0]}());}\n`;
   parse(result, { ecmaVersion: "latest", sourceType: "module" });
   return result;
@@ -110,7 +143,7 @@ function main() {
   if (dialogTargets.length !== 1) throw new Error("原生对话框资源缺失或不唯一");
   const dialogPath = path.join(directory, dialogTargets[0]);
   const dialogPatched = patchDialogs(fs.readFileSync(dialogPath, "utf8"));
-  if (process.argv.includes("--check")) { console.log("[ok] 原生外观设置/响应式正文结构已核对，8 档宽度及排版样式可注入"); return; }
+  if (process.argv.includes("--check")) { console.log("[ok] 原生外观设置/响应式正文结构已核对，百分比扩宽档位可注入主题卡片"); return; }
   fs.writeFileSync(settingsPath, patched);
   fs.writeFileSync(entryPath, entryPatched);
   fs.writeFileSync(dialogPath, dialogPatched);

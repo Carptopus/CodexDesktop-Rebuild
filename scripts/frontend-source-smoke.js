@@ -64,7 +64,16 @@ function verifyFrontendSource(assets) {
   }
   const settings = files.filter(name => /^general-settings-/.test(name)
     && fs.readFileSync(path.join(assets, name), "utf8").includes("settings.appearance.visualStyle")); assert.equal(settings.length, 1);
-  assert.match(fs.readFileSync(path.join(assets, settings[0]), "utf8"), /jsx\)\(__CodexRebuildReadingWidth/);
+  const settingsSource = fs.readFileSync(path.join(assets, settings[0]), "utf8");
+  assert.match(settingsSource, /jsx\)\(__CodexRebuildReadingWidth/);
+  assert.match(settingsSource, /codex-rebuild-reading-width:visual-card/);
+  assert.match(settingsSource, /codex-rebuild-local-accent-presets/);
+  assert.match(settingsSource, /__codexSelectAccent/);
+  const readingModule = fs.readFileSync(path.join(assets, "codex-rebuild-reading-width.js"), "utf8");
+  assert.match(readingModule, /codex-rebuild:markdown-bold-color-mode:v1/);
+  assert.match(readingModule, /--app-color-text-accent/);
+  assert.doesNotMatch(readingModule, /--color-token-charts-green|--green-500|#00a240/);
+  assert.doesNotMatch(readingModule, /设置无效|请重新选择/);
   const shared = files.filter(name => /^app-shared-/.test(name) && fs.readFileSync(path.join(assets, name), "utf8").includes("codex-rebuild-dialog-default"));
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");

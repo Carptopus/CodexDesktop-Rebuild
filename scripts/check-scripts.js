@@ -4,7 +4,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const root = path.resolve(__dirname, "..");
 const files = fs.readdirSync(__dirname).filter((name) => /\.(?:js|cjs)$/.test(name));
-files.push("../forge.config.js", "runtime/image-generation-auth.cjs");
+files.push("../forge.config.js");
 files.push("runtime/rebuild-test-isolation.cjs");
 files.push("runtime/rebuild-test-environment.cjs");
 files.push("runtime/reading-width.mjs");
