@@ -56,11 +56,45 @@ test("无账户主题时启用本地预设并保留加载态禁用", () => {
   assert.equal(result.status, "patched", result.reason);
   assert.match(result.source, new RegExp(SETTINGS_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(result.source, new RegExp(MODULE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(result.source, /function Accent\(e\)\{const __codexCurrentAccent=r\.accent;/);
+  assert.doesNotMatch(result.source, /__codexCurrentAccent/);
   assert.match(result.source, /disabled:u===void 0/);
-  assert.match(result.source, /__codexSelectAccentPreset\(u,e,\(\)=>o\(__codexCurrentAccent\),\(\)=>a\(/);
+  assert.match(result.source, /__codexSelectAccentPreset\(u,e,\(\)=>o\(r\.accent\),\(\)=>a\(/);
   assert.match(result.source, /onChange:__codexColor=>__codexUseCustomAccent\(o,__codexColor\)/);
   assert.equal(patchSettingsSource(result.source).status, "already-patched");
+});
+
+test("设置组件在属性解构后才读取主题", () => {
+  const result = patchSettingsSource(settingsFixture());
+  assert.equal(result.status, "patched", result.reason);
+  const executable = result.source.replace(/import[^;]+;/g, "");
+  const Accent = Function(
+    "P", "O", "scope", "read", "themeAtom", "pendingAtom", "jsx", "RadioItem", "ColorInput",
+    "account", "settings", "sync", "toast", "__codexAccentSelection", "__codexSelectAccentPreset", "__codexUseCustomAccent",
+    `${executable};return Accent;`,
+  )(
+    () => "color", ["default", "blue"], () => ({ get: () => null }), () => null, {}, {},
+    (_type, props) => props, "radio", "color", {}, {}, () => {}, () => {},
+    (_accountTheme, fallback) => fallback,
+    () => Promise.resolve(),
+    (onChange, value) => onChange(value),
+  );
+
+  assert.doesNotThrow(() => Accent({
+    theme: { accent: "#123456", accentSource: "custom" },
+    variant: "light",
+    onSelect: () => Promise.resolve(),
+    onCustomColorChange: () => {},
+  }));
+});
+
+test("旧版在属性解构前读取主题的崩溃补丁会被拒绝", () => {
+  const patched = patchSettingsSource(settingsFixture());
+  assert.equal(patched.status, "patched", patched.reason);
+  const broken = patched.source.replace("function Accent(e){let", "function Accent(e){const __codexCurrentAccent=r.accent;let");
+  const result = patchSettingsSource(broken);
+
+  assert.equal(result.status, "unexpected-shape");
+  assert.match(result.reason, /本地强调色设置标记不完整/);
 });
 
 test("设置和主题未知结构均明确失败", () => {

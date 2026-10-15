@@ -72,7 +72,7 @@ function patchSettingsSource(source) {
   }
   if (source.includes(SETTINGS_MARKER)) {
     parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    if (![MODULE, "__codexCurrentAccent=", "__codexAccentSelection(", "__codexSelectAccentPreset(", "__codexUseCustomAccent("].every(value => source.includes(value))) {
+    if (![MODULE, "__codexAccentSelection(", "__codexSelectAccentPreset(", "__codexUseCustomAccent("].every(value => source.includes(value)) || source.includes("__codexCurrentAccent=")) {
       return { status: "unexpected-shape", source, reason: "本地强调色设置标记不完整" };
     }
     return { status: "already-patched", source };
@@ -117,14 +117,12 @@ function patchSettingsSource(source) {
     const moduleImport = `\n${SETTINGS_MARKER}\nimport {accentPresetSelection as __codexAccentSelection,selectAccentPreset as __codexSelectAccentPreset,useCustomAccent as __codexUseCustomAccent} from "./${MODULE}";`;
     const edits = [
       { start: importAt, end: importAt, text: moduleImport },
-      { start: component.body.start + 1, end: component.body.start + 1,
-        text: `const __codexCurrentAccent=${theme}.accent;` },
       { start: selection.init.start, end: selection.init.end,
         text: `__codexAccentSelection(${accountTheme},${originalSelection})` },
       // undefined 表示账户主题仍在加载；null 才表示没有可用账户主题。
       { start: disabled.value.start, end: disabled.value.end, text: `${accountTheme}===void 0` },
       { start: accountCall.start, end: accountCall.end,
-        text: `__codexSelectAccentPreset(${accountTheme},${preset.name},()=>${selectCustom}(__codexCurrentAccent),()=>${originalAccountCall})` },
+        text: `__codexSelectAccentPreset(${accountTheme},${preset.name},()=>${selectCustom}(${theme}.accent),()=>${originalAccountCall})` },
       { start: customCall.start, end: customCall.end,
         text: `__codexUseCustomAccent(${selectCustom},${customValue})` },
       { start: onChange.value.start, end: onChange.value.end,

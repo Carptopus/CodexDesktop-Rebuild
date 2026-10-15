@@ -3,8 +3,8 @@
  * 补齐 API-key 模式的首页导航记录。
  *
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
- * ChatGPT capability 限制，导致 API-key 下从不写入、点击首页落到空路由。
- * 这里只放行 apikey 写入，不开启 ChatGPT capability，也不改变其他认证方式。
+ * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入、点击首页落到空路由。
+ * 这里只放行 apikey 写入，不开启这些 ChatGPT 账户能力，也不改变其他认证方式。
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -104,9 +104,9 @@ function findTracker(ast) {
       other.start <= node.start && other.end >= node.end));
     if (outermost.length !== 1) continue;
     const guard = outermost[0];
-    if (guard.left?.type !== "LogicalExpression" || guard.left.operator !== "&&") continue;
+    if (guard.left?.type !== "LogicalExpression") continue;
 
-    candidates.push({ authMethod: auth[0].authMethod, gate: guard.left.right });
+    candidates.push({ authMethod: auth[0].authMethod, gate: guard.left });
   }
   if (candidates.length > 1) throw new Error(`首页导航跟踪器 数量异常（${candidates.length}）`);
   return candidates[0] ?? null;
@@ -137,8 +137,9 @@ function patchSource(source) {
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
       return { status: "already-patched", source };
     }
-    if (tracker.gate.type !== "Identifier") {
-      throw new Error("ChatGPT capability 条件结构未知");
+    if (tracker.gate.type !== "LogicalExpression" || tracker.gate.operator !== "&&" ||
+      tracker.gate.left?.type !== "Identifier" || tracker.gate.right?.type !== "Identifier") {
+      throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
     const originalGate = source.slice(tracker.gate.start, tracker.gate.end);
     const replacement = `(${originalGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`;
