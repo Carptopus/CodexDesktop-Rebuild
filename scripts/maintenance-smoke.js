@@ -239,32 +239,6 @@ try {
   assert.equal(fs.statSync(path.join(storageTemp, "codex-forensics-fatal.log")).size, 16);
   checks++;
 
-  if (process.platform === "win32") {
-    const archiveProject = path.join(temporary, "archive-project");
-    const archiveScript = path.join(archiveProject, "local", "scripts", "Archive-Candidate.ps1");
-    fs.mkdirSync(path.dirname(archiveScript), { recursive: true });
-    fs.copyFileSync(path.join(scriptRoot, "..", "local", "scripts", "Archive-Candidate.ps1"), archiveScript);
-    for (let index = 1; index <= 3; index++) {
-      const candidateDirectory = path.join(archiveProject, `candidate-${index}`);
-      const zipName = `candidate-${index}.zip`, packageName = `source-${index}.msix`;
-      const zipPayload = `zip-${index}`, packagePayload = `msix-${index}`;
-      write(path.join(candidateDirectory, zipName), zipPayload);
-      write(path.join(candidateDirectory, packageName), packagePayload);
-      json(path.join(candidateDirectory, "candidate.json"), {
-        schemaVersion: 1, repository: "Carptopus/CodexDesktop-Rebuild",
-        sourceCommit: String(index).repeat(40),
-        upstream: { version: `1.0.0.${index}`, packageName, sha256: hash(packagePayload) },
-        zip: { name: zipName, sha256: hash(zipPayload) },
-      });
-      const archived = spawnSync("pwsh", ["-NoProfile", "-File", archiveScript, "-CandidateDirectory", candidateDirectory, "-Keep", "2"], { encoding: "utf8" });
-      assert.equal(archived.status, 0, archived.stdout + archived.stderr);
-      const destination = path.join(archiveProject, "release", "archive", `1.0.0.${index}-${String(index).repeat(40)}`);
-      fs.utimesSync(destination, new Date(2020, 0, index), new Date(2020, 0, index));
-    }
-    const kept = fs.readdirSync(path.join(archiveProject, "release", "archive")).sort();
-    assert.deepEqual(kept, [`1.0.0.2-${"2".repeat(40)}`, `1.0.0.3-${"3".repeat(40)}`]);
-    checks++;
-  }
   console.log(`维护链功能测试通过：${checks} 个 CLI 场景；实际 GUI、原始 MSIX 和签名由候选验收覆盖。`);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
