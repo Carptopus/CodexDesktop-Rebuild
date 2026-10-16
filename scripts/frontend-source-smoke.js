@@ -82,7 +82,7 @@ function verifyFrontendSource(assets) {
   const navigationSource = fs.readFileSync(path.join(assets, navigationEntries[0]), "utf8");
   assert.match(navigationSource, /\|\|\/\* Codex：API-key 首页恢复写入。 \*\/[A-Za-z_$][\w$]*===`apikey`/);
   assert.match(navigationSource,
-    /\|\|\/\* Codex：API-key 当前首页保持会话。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*\?\.pathname!==`\/`/);
+    /\/\* Codex：API-key 当前首页保持会话。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*===`home`&&[A-Za-z_$][\w$]*!=null&&\([A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/local\/`\)\|\|[A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/remote\/`\)\)/);
   const accentModule = fs.readFileSync(path.join(assets, "codex-rebuild-accent-presets.js"), "utf8");
   assert.match(accentModule, /codex-rebuild:accent-preset:v1/);
   assert.match(accentModule, /export function resolveAccentPreset/);

@@ -5,8 +5,9 @@
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
  * 同时，旧导航模式不会把“当前会话已经属于首页”视为已到达目标，最终让
- * 首页按钮落到空路由。这里只允许非根路径的 API-key 当前会话短路；根路径
- * 仍须继续执行官方落地页导航，避免空数据启动停在没有页面组件的 `/`。
+ * 首页按钮落到空路由。这里只对 API-key 下已经位于 `/local/<id>` 或
+ * `/remote/<id>` 的首页会话直接短路，不再依赖新导航开关、hash、区域推断或
+ * sidebarProductMode；根路径和非会话页面仍执行官方导航。
  * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
  */
 const fs = require("node:fs");
@@ -138,6 +139,40 @@ function memberRoot(node) {
   return current?.type === "Identifier" ? current.name : null;
 }
 
+function logicalTerms(node, operator) {
+  if (node?.type !== "LogicalExpression" || node.operator !== operator) return [node];
+  return [...logicalTerms(node.left, operator), ...logicalTerms(node.right, operator)];
+}
+
+function isComparison(node, identifier, operator, value) {
+  return node?.type === "BinaryExpression" && node.operator === operator &&
+    node.left?.type === "Identifier" && node.left.name === identifier &&
+    (value === null ? node.right?.type === "Literal" && node.right.value === null :
+      literal(node.right) === value);
+}
+
+function isPathPrefixCheck(node, currentLocation, prefix) {
+  return node?.type === "CallExpression" && node.arguments.length === 1 &&
+    literal(node.arguments[0]) === prefix && memberName(node.callee) === "startsWith" &&
+    node.callee.object?.type === "MemberExpression" &&
+    memberName(node.callee.object) === "pathname" &&
+    memberRoot(node.callee.object) === currentLocation;
+}
+
+function isCurrentHomeOverride(node, accountKey, area, currentLocation) {
+  const terms = logicalTerms(node, "&&");
+  if (terms.length !== 4) return false;
+  const paths = terms.find(item => item?.type === "LogicalExpression" && item.operator === "||");
+  if (!paths) return false;
+  const pathTerms = logicalTerms(paths, "||");
+  return terms.some(item => isComparison(item, accountKey, "===", "auth:apikey")) &&
+    terms.some(item => isComparison(item, area, "===", "home")) &&
+    terms.some(item => isComparison(item, currentLocation, "!=", null)) &&
+    pathTerms.length === 2 &&
+    pathTerms.some(item => isPathPrefixCheck(item, currentLocation, "/local/")) &&
+    pathTerms.some(item => isPathPrefixCheck(item, currentLocation, "/remote/"));
+}
+
 function findCurrentHomeGuard(ast) {
   const candidates = [];
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
@@ -168,14 +203,23 @@ function findCurrentHomeGuard(ast) {
     const modeChecks = nodes(guards[0].test, node => node.type === "LogicalExpression" &&
       node.operator === "&&" &&
       (node.left?.type === "Identifier" ||
-        isAccountKeyOverride(node.left, accountKey, currentLocation)) &&
+        isLegacyCurrentHomeOverride(node.left, accountKey, currentLocation)) &&
       node.right?.type === "BinaryExpression" && ["!=", "!=="].includes(node.right.operator) &&
       literal(node.right.right) === null);
     if (modeChecks.length !== 1) continue;
+    const overrides = nodes(fn, node => node.type === "IfStatement" &&
+      returnsTrue(node.consequent) &&
+      isCurrentHomeOverride(node.test, accountKey, area, currentLocation), true);
+    if (overrides.length > 1) {
+      throw new Error(`API-key 当前首页短路 数量异常（${overrides.length}）`);
+    }
     candidates.push({
       accountKey,
+      area,
       currentLocation,
       gate: modeChecks[0].left,
+      statement: guards[0],
+      override: overrides[0] ?? null,
     });
   }
   if (candidates.length > 1) {
@@ -192,7 +236,7 @@ function isApiKeyOverride(node, authMethod) {
     literal(comparison.right) === "apikey";
 }
 
-function isAccountKeyOverride(node, accountKey, currentLocation) {
+function isLegacyCurrentHomeOverride(node, accountKey, currentLocation) {
   if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
   const override = node.right;
   if (override?.type !== "LogicalExpression" || override.operator !== "&&") return false;
@@ -201,9 +245,9 @@ function isAccountKeyOverride(node, accountKey, currentLocation) {
   return account?.type === "BinaryExpression" && ["===", "=="].includes(account.operator) &&
     account.left?.type === "Identifier" && account.left.name === accountKey &&
     literal(account.right) === "auth:apikey" &&
-    pathname?.type === "BinaryExpression" && ["!==", "!=", "===", "=="].includes(pathname.operator) &&
+    pathname?.type === "BinaryExpression" && ["!==", "!="].includes(pathname.operator) &&
     memberName(pathname.left) === "pathname" && memberRoot(pathname.left) === currentLocation &&
-    literal(pathname.right) === "/" && ["!==", "!="].includes(pathname.operator);
+    literal(pathname.right) === "/";
 }
 
 function patchSource(source) {
@@ -222,11 +266,7 @@ function patchSource(source) {
       return { status: "not-applicable", source };
     }
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const currentHomePatched = isAccountKeyOverride(
-      currentHome.gate,
-      currentHome.accountKey,
-      currentHome.currentLocation,
-    );
+    const currentHomePatched = currentHome.override != null;
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
@@ -235,8 +275,8 @@ function patchSource(source) {
       throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
     if (currentHomePatched) {
-      const gateSource = source.slice(currentHome.gate.start, currentHome.gate.end);
-      if (!gateSource.includes(CURRENT_HOME_MARKER)) {
+      const overrideSource = source.slice(currentHome.override.start, currentHome.override.end);
+      if (!overrideSource.includes(CURRENT_HOME_MARKER)) {
         throw new Error("API-key 当前首页逻辑存在但缺少本项目标记");
       }
     } else if (currentHome.gate.type !== "Identifier") {
@@ -254,11 +294,10 @@ function patchSource(source) {
       });
     }
     if (!currentHomePatched) {
-      const originalGate = source.slice(currentHome.gate.start, currentHome.gate.end);
       edits.push({
-        start: currentHome.gate.start,
-        end: currentHome.gate.end,
-        replacement: `(${originalGate}||${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`&&${currentHome.currentLocation}?.pathname!==\`/\`)`,
+        start: currentHome.statement.start,
+        end: currentHome.statement.start,
+        replacement: `if(${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`&&${currentHome.area}===\`home\`&&${currentHome.currentLocation}!=null&&(${currentHome.currentLocation}.pathname.startsWith(\`/local/\`)||${currentHome.currentLocation}.pathname.startsWith(\`/remote/\`)))return!0;`,
       });
     }
     let next = source;

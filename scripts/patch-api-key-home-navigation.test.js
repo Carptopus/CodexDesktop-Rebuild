@@ -45,28 +45,39 @@ test("API-key 在 ChatGPT capability 关闭时仍写入与读取端一致的 acc
 
 function restore(source, accountKey, {
   currentPath = "/local/thread-1",
+  currentHash = "",
+  currentState = null,
+  newNavigation = false,
+  sanitizedHash = currentHash,
   saved = { departedAt: null, location: { pathname: "/local/thread-1" } },
 } = {}) {
   const navigations = [];
-  const current = currentPath == null ? null : { hash: "", pathname: currentPath, state: null };
+  const current = currentPath == null ? null : {
+    hash: currentHash,
+    pathname: currentPath,
+    state: currentState,
+  };
   const store = {
     get(key) {
-      if (key === "wc") return false;
+      if (key === "wc") return newNavigation;
       if (key === "Ug") return current;
       if (key === "lj") return "codex";
       return null;
     },
   };
-  const run = Function("store", "navigate", "accountKey", "saved", [
+  const run = Function("store", "navigate", "accountKey", "saved", "sanitizedHash", [
     "const wc=`wc`,Ug=`Ug`,lj=`lj`;",
     "const bti=()=>saved;",
-    "const sti=location=>({hash:location.hash??``});",
-    "const Ati=(_store,location)=>location.pathname===`/`||location.pathname.startsWith(`/local/`)?`home`:null;",
+    "const sti=()=>({hash:sanitizedHash});",
+    "const Ati=(_store,location)=>location.pathname===`/`||location.pathname.startsWith(`/local/`)||location.pathname.startsWith(`/remote/`)?`home`:null;",
     "const ym=location=>location.pathname;",
     source,
     "return Sti(store,{accountKey,area:`home`,navigate,productMode:`codex`});",
   ].join(""));
-  return { navigations, value: run(store, path => navigations.push(path), accountKey, saved) };
+  return {
+    navigations,
+    value: run(store, path => navigations.push(path), accountKey, saved, sanitizedHash),
+  };
 }
 
 test("API-key 旧导航模式下点击首页保持当前会话", () => {
@@ -74,6 +85,29 @@ test("API-key 旧导航模式下点击首页保持当前会话", () => {
   const restored = restore(result.source, "auth:apikey");
 
   assert.ok(result.source.includes(CURRENT_HOME_MARKER));
+  assert.equal(restored.value, true);
+  assert.deepEqual(restored.navigations, []);
+});
+
+test("API-key 远程会话点击首页保持当前会话", () => {
+  const result = patchSource(fixture());
+  const restored = restore(result.source, "auth:apikey", {
+    currentPath: "/remote/task-1",
+  });
+
+  assert.equal(restored.value, true);
+  assert.deepEqual(restored.navigations, []);
+});
+
+test("API-key 会话短路不依赖 hash 和 sidebarProductMode", () => {
+  const result = patchSource(fixture());
+  const restored = restore(result.source, "auth:apikey", {
+    currentHash: "#panel=diff",
+    currentState: { sidebarProductMode: "other" },
+    newNavigation: true,
+    sanitizedHash: "",
+  });
+
   assert.equal(restored.value, true);
   assert.deepEqual(restored.navigations, []);
 });
@@ -112,6 +146,17 @@ test("API-key 从设置页仍恢复已经离开的首页会话", () => {
   const result = patchSource(fixture());
   const restored = restore(result.source, "auth:apikey", {
     currentPath: "/settings/appearance",
+    saved: { departedAt: Date.now(), location: { pathname: "/local/thread-1" } },
+  });
+
+  assert.equal(restored.value, true);
+  assert.deepEqual(restored.navigations, ["/local/thread-1"]);
+});
+
+test("API-key 非会话页面不获得当前首页短路", () => {
+  const result = patchSource(fixture());
+  const restored = restore(result.source, "auth:apikey", {
+    currentPath: "/projects/example",
     saved: { departedAt: Date.now(), location: { pathname: "/local/thread-1" } },
   });
 
