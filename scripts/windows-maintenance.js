@@ -110,7 +110,9 @@ function inspectUpdater(asarRoot) {
 function saveCompatibilityEvidence(asarRoot, source) {
   const destination = path.join(root, "patch-reports", "source-evidence");
   const signatures = ["shouldIncludeUpdater", "shouldIncludeWindowsUpdater", "shouldIncludeWindowsMsixUpdater",
-    "FlyoutSubmenuItem", "flyoutHeader", "data-model-picker-model-row", "data-model-picker-view", "modelListConfig"];
+    "FlyoutSubmenuItem", "flyoutHeader", "data-model-picker-model-row", "data-model-picker-view", "modelListConfig",
+    "serviceTierAccess", "Failed to read service tier for request",
+    "codex_browser_use_agent_request_header", "Browser request-header policy requires caller identity."];
   const files = [];
   for (const [label, directory] of [["main", ".vite/build"], ["webview", "webview/assets"]]) {
     const sourceDirectory = path.join(asarRoot, directory);
@@ -123,7 +125,9 @@ function saveCompatibilityEvidence(asarRoot, source) {
       if (!matches.length && !startupEvidence) continue;
       const copied = label === "main" ? require("./patch-updater").auditUpdaterSource(text).length > 0
         : matches.includes("flyoutHeader") || matches.includes("data-model-picker-model-row")
-          || matches.includes("data-model-picker-view") && matches.includes("modelListConfig");
+          || matches.includes("data-model-picker-view") && matches.includes("modelListConfig")
+          || matches.some((match) => ["serviceTierAccess", "Failed to read service tier for request",
+            "codex_browser_use_agent_request_header", "Browser request-header policy requires caller identity."].includes(match));
       const readingEvidence = matches.includes("settings.appearance.visualStyle") || name.endsWith(".css") && matches.some(match => match.startsWith("--"));
       if (copied || readingEvidence || startupEvidence) {
         fs.mkdirSync(path.join(destination, label), { recursive: true });
