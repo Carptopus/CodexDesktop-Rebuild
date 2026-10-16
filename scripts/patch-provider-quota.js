@@ -80,61 +80,21 @@ function importFor(ast, localName) {
   return null;
 }
 
-function exportFor(ast, localName) {
-  for (const declaration of ast.body) {
-    if (declaration.type !== "ExportNamedDeclaration") continue;
-    const specifier = declaration.specifiers.find(s => s.local.name === localName);
-    if (specifier) return specifier.exported.name;
-  }
-  return null;
-}
-
-function getQuotaMetadata(source) {
+function getProviderMetadata(source) {
   const ast = parseModule(source);
-  const hardBlockAtoms = nodes(ast, node => {
-    const item = binding(node);
-    if (item?.init?.type !== "CallExpression") return false;
-    return item.init.arguments.some(arg => arg.type === "ArrowFunctionExpression" &&
-      property(arg.body) === "hardBlocked" &&
-      unwrap(arg.body).object.type === "CallExpression");
-  }).map(node => binding(node).name);
-  // Upstream's ordinary-model presets already resolve thread provider before
-  // config.model_provider. Reuse that exact thread-summary atom, not its name,
-  // the provider's display name, an auth flag, or a particular model slug.
   const providerReads = nodes(ast, node => node.type === "LogicalExpression" &&
     node.operator === "??" && node.left.type === "CallExpression" &&
-    node.left.arguments.length === 2 && property(node.right) === "model_provider");
-  if (hardBlockAtoms.length !== 1 || providerReads.length !== 1) {
-    throw new Error("OpenAI quota atom or effective thread-provider lookup is ambiguous/missing");
+    node.left.arguments.length === 2 && node.left.arguments[0]?.type === "Identifier" &&
+    property(node.right) === "model_provider");
+  const providerAtoms = [...new Set(providerReads.map(node => node.left.arguments[0].name))];
+  if (providerAtoms.length !== 1) {
+    throw new Error("Effective thread-provider lookup is ambiguous/missing");
   }
-  const hardBlockExport = exportFor(ast, hardBlockAtoms[0]);
-  const threadProviderImport = importFor(ast, providerReads[0].left.arguments[0].name);
-  if (!hardBlockExport || !threadProviderImport) {
-    throw new Error("OpenAI quota/thread-provider module bindings not found");
+  const threadProviderImport = importFor(ast, providerAtoms[0]);
+  if (!threadProviderImport) {
+    throw new Error("Effective thread-provider import not found");
   }
-  return { hardBlockExport, threadProviderImport };
-}
-
-function importedLocal(ast, source, exportedName) {
-  for (const declaration of ast.body) {
-    if (declaration.type !== "ImportDeclaration" || declaration.source.value !== source) continue;
-    const specifier = declaration.specifiers.find(s => s.imported?.name === exportedName);
-    if (specifier) return specifier.local.name;
-  }
-  return null;
-}
-
-function quotaAtoms(ast, source) {
-  return new Set(nodes(ast, node => {
-    const item = binding(node);
-    if (item?.init?.type !== "CallExpression") return false;
-    return item.init.arguments.some(arg => {
-      if (arg.type !== "ArrowFunctionExpression") return false;
-      const text = source.slice(arg.start, arg.end);
-      return ["authMethod", "authenticatedAccountId", "rate_limit", "allowed",
-        "windowMinutes", "resetsAt"].every(key => text.includes(key));
-    });
-  }).map(node => binding(node).name));
+  return { threadProviderAtom: providerAtoms[0], threadProviderImport };
 }
 
 function unique(items, label) {
@@ -159,19 +119,15 @@ function hasExternalBaseUrl(provider) {
   }
 }
 
-function patchSource(source, metadata, initialImport) {
+function patchSource(source) {
   try {
     const updating = source.includes(MARKER);
     const ast = parseModule(source);
-    const hardBlockAtom = importedLocal(ast, initialImport, metadata.hardBlockExport);
-    const threadProviderAtom = importedLocal(ast, metadata.threadProviderImport.source,
-      metadata.threadProviderImport.name);
-    if (!hardBlockAtom || !threadProviderAtom) throw new Error("Composer quota/provider imports not found");
+    const { threadProviderAtom } = getProviderMetadata(source);
     if (!updating && [CUSTOM, PROVIDER, THREAD_PROVIDER, PROVIDER_CONFIG]
       .some(name => source.includes(name))) {
       throw new Error("Custom-provider patch binding already exists without its marker");
     }
-    const nativeQuotaAtoms = quotaAtoms(ast, source);
     const composer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
       nodes(node, child => property(child) === "submitDisabled", true).length > 0 &&
       nodes(node, child => property(child) === "resolvedConfig").length > 0),
@@ -186,41 +142,43 @@ function patchSource(source, metadata, initialImport) {
     const disabled = unique(declarations.filter(node => node.id.name === submit.value.name && node.init),
       "Submit-disabled expression");
     const referenced = new Set(nodes(disabled.init, node => node.type === "Identifier").map(node => node.name));
-    const hardBlock = unique(declarations.filter(node => referenced.has(node.id.name) &&
-      node.init?.type === "CallExpression" && node.init.arguments[0]?.name === hardBlockAtom &&
-      node.init.arguments.length === 2), "Host quota gate");
-    const baseBlock = unique(declarations.filter(node => referenced.has(node.id.name) && node.init &&
-      nodes(node.init, child => child.type === "CallExpression" && child.arguments.length === 1 &&
-        nativeQuotaAtoms.has(child.arguments[0].name)).length > 0), "Account quota gate");
     const configNames = new Set(memberReads.filter(node => property(node) === "resolvedConfig")
       .map(node => unwrap(node).object.name));
     const pendingNames = new Set(memberReads.filter(node => property(node) === "isConfigDataPending")
       .map(node => unwrap(node).object.name));
     const config = unique(declarations.filter(node => configNames.has(node.id.name) &&
       pendingNames.has(node.id.name) && node.init?.type === "CallExpression"), "Resolved composer config");
-    const target = config.init.arguments[0];
-    const targets = target?.type === "ObjectExpression" ? [target] : ownNodes
-      .map(binding).filter(item => item?.name === target?.name && item.init?.type === "ObjectExpression")
-      .map(item => item.init);
-    const targetObject = unique(targets, "Composer config target");
+    const contextGates = [];
+    for (const gate of declarations.filter(node => referenced.has(node.id.name) &&
+      node.init?.type === "CallExpression")) {
+      for (const argument of gate.init.arguments.filter(arg => arg.type === "Identifier")) {
+        const assignments = ownNodes.map(binding).filter(item => item?.name === argument.name && item.init);
+        for (const assignment of assignments) {
+          const contexts = nodes(assignment.init, node => node.type === "ObjectExpression" &&
+            ["conversationId", "hostId"].every(name =>
+              node.properties.some(prop => property(prop) === name)));
+          for (const context of contexts) {
+            contextGates.push({ gate, context, contextName: argument.name });
+          }
+        }
+      }
+    }
+    const contextGate = unique(contextGates, "Composer conversation/host quota gate");
+    const targetObject = contextGate.context;
     const conversation = targetObject.properties.find(prop => property(prop) === "conversationId")?.value;
     const host = targetObject.properties.find(prop => property(prop) === "hostId")?.value;
     if (conversation?.type !== "Identifier" || host?.type !== "Identifier") {
       throw new Error("Composer config target lacks conversation/host identifiers");
     }
-    function resolveAlias(name) {
-      const seen = new Set();
-      while (!seen.has(name)) {
-        seen.add(name);
-        const alias = declarations.find(node => node.id.name === name && node.init?.type === "Identifier");
-        if (!alias) break;
-        name = alias.init.name;
-      }
-      return name;
-    }
-    if (resolveAlias(host.name) !== resolveAlias(hardBlock.init.arguments[1].name)) {
-      throw new Error("Composer config and quota hosts differ");
-    }
+    const baseBlock = contextGate.gate;
+    const hardBlock = unique(declarations.filter(node => {
+      if (!referenced.has(node.id.name) || node.init?.type !== "CallExpression" ||
+        node.init.arguments.length !== 1) return false;
+      const terms = nodes(node.init.arguments[0], child => child.type === "BinaryExpression" &&
+        ["===", "=="].includes(child.operator) && child.left?.type === "Identifier" &&
+        child.left.name === host.name && value(child.right) === "local");
+      return terms.length === 1;
+    }), "Host quota gate");
     const scopes = [...new Set(ownNodes.filter(node => property(node) === "kind" &&
       property(unwrap(node).object) === "value")
       .map(node => unwrap(unwrap(node).object).object.name))];
@@ -228,7 +186,7 @@ function patchSource(source, metadata, initialImport) {
     const statement = unique(composer.body.body.filter(node => node.type === "VariableDeclaration" &&
       node.declarations.includes(disabled)), "Submit-disabled declaration");
     if (config.end > statement.start) throw new Error("Composer config is resolved after submission gating");
-    const guard = `${MARKER}\nconst ${THREAD_PROVIDER}=${source.slice(hardBlock.init.callee.start, hardBlock.init.callee.end)}(${threadProviderAtom},${conversation.name}),` +
+    const guard = `${MARKER}\nconst ${THREAD_PROVIDER}=${source.slice(baseBlock.init.callee.start, baseBlock.init.callee.end)}(${threadProviderAtom},${conversation.name}),` +
       `${PROVIDER}=${THREAD_PROVIDER}??(${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_provider),` +
       `${PROVIDER_CONFIG}=${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_providers?.[${PROVIDER}],` +
       `${CUSTOM}=(${scope}.value.kind===\`local\`||${scope}.value.kind===\`new\`&&!${scope}.value.cloudThreadPrototype)` +
@@ -300,19 +258,18 @@ function main() {
         .map(name => ({ name, source: fs.readFileSync(path.join(directory.path, name), "utf8") }));
       const candidates = [];
       const diagnostics = [];
-      for (const file of files.filter(file => file.source.includes("hardBlocked") &&
-        file.source.includes("model_provider") && file.source.includes("additional_rate_limits"))) {
-        try { candidates.push({ file, metadata: getQuotaMetadata(file.source) }); }
+      for (const file of files.filter(file => file.source.includes("submitDisabled") &&
+        file.source.includes("model_provider") && file.source.includes("resolvedConfig") &&
+        file.source.includes("isConfigDataPending"))) {
+        try {
+          const result = patchSource(file.source);
+          if (result.status === "error") throw new Error(result.reason);
+          candidates.push({ file, result });
+        }
         catch (error) { diagnostics.push(`${file.name}: ${error.message}`); }
       }
-      if (!candidates.length) throw new Error(`OpenAI quota metadata not found; ${diagnostics.join("; ")}`);
-      const { file: initial, metadata } = unique(candidates, "OpenAI quota metadata bundle");
-      const primary = unique(files.filter(file => file.name !== initial.name &&
-        file.source.includes(`./${initial.name}`) && file.source.includes("submitDisabled") &&
-        file.source.includes("resolvedConfig") && file.source.includes("isConfigDataPending")),
-      "Composer bundle");
-      const result = patchSource(primary.source, metadata, `./${initial.name}`);
-      if (result.status === "error") throw new Error(result.reason);
+      if (!candidates.length) throw new Error(`Provider-aware composer not found; ${diagnostics.join("; ")}`);
+      const { file: primary, result } = unique(candidates, "Provider-aware composer bundle");
       const filePath = path.join(directory.path, primary.name);
       console.log(`  [${directory.platform}] ${relPath(filePath)}`);
       if (result.status === "already") {
@@ -334,4 +291,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { MARKER, getQuotaMetadata, patchSource };
+module.exports = { MARKER, getProviderMetadata, patchSource };

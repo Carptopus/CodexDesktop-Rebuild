@@ -55,6 +55,9 @@ function patchSource(source) {
       node.id?.name &&
       LABEL_IDS.every((id) => source.slice(node.start, node.end).includes(id)),
   );
+  if (petComponents.length === 0) {
+    return { status: "not-applicable", source };
+  }
   if (petComponents.length !== 1) {
     return {
       status: "unexpected-pet-component-count",
@@ -102,15 +105,25 @@ function locateTargets(platform) {
   for (const name of platforms) {
     const directory = path.join(SRC_DIR, name, "_asar", "webview", "assets");
     if (!fs.existsSync(directory)) continue;
-    const matches = fs.readdirSync(directory)
+    const candidates = fs.readdirSync(directory)
       .filter((file) => file.endsWith(".js"))
       .map((file) => path.join(directory, file))
       .filter((file) => {
         const source = fs.readFileSync(file, "utf8");
         return LABEL_IDS.every((id) => source.includes(id));
       });
+    const diagnostics = [];
+    const matches = candidates.filter((file) => {
+      const result = patchSource(fs.readFileSync(file, "utf8"));
+      if (["patched", "already-patched"].includes(result.status)) return true;
+      if (result.status !== "not-applicable") {
+        diagnostics.push(`${path.basename(file)}: ${result.status}`);
+      }
+      return false;
+    });
     if (matches.length !== 1) {
-      throw new Error(`[${name}] Pet 菜单资源数量异常（${matches.length}）`);
+      const detail = diagnostics.length ? `；${diagnostics.join("；")}` : "";
+      throw new Error(`[${name}] Pet 菜单资源数量异常（${matches.length}）${detail}`);
     }
     targets.push({ platform: name, path: matches[0] });
   }

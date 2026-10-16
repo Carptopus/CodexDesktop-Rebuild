@@ -43,3 +43,14 @@ test("Pet 组件存在但菜单调用结构未知时明确失败", () => {
 test("没有 Pet 功能的资源不适用", () => {
   assert.equal(patchSource("function menu(){return null}").status, "not-applicable");
 });
+
+test("只包含 Pet 本地化文案的资源不构成菜单目标", () => {
+  const source = `const messages=${JSON.stringify(Object.fromEntries([
+    "showPet",
+    "hidePet",
+    "showMini",
+    "hideMini",
+  ].map(name => [`codex.profileFooter.${name}`, name])))};`;
+
+  assert.equal(patchSource(source).status, "not-applicable");
+});
