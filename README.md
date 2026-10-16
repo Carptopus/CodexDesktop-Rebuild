@@ -38,8 +38,22 @@ npm run build:all
 
 - `src/<platform>/_asar` 是 ASAR 内资源的补丁目标。
 - `src/<platform>/plugins` 与 `src/<platform>/cua_node` 是 Browser / Computer Use 等外置运行时的补丁目标；直打包流程会显式覆盖这两个目录，避免重新复制上游安装包缓存时丢失补丁。
-- `patch-browser-auth.js` 兼容 API-key 登录：ChatGPT 身份与 request-header 策略可用时保持原行为；身份读取失败时仅关闭该可选请求头并继续本地浏览器通道，不会把 API key 伪装或发送为 ChatGPT token。
-- `patch-image-generation-auth.js` 兼容自定义 `base_url` 的 API-key 登录：仅对非 OpenAI/ChatGPT 官方地址为 app-server 注入 provider 认证、`image_gen` 能力参数，并在没有静态模型目录时启用远端模型发现；显式关闭项及已有 `model_catalog_json`/`model_catalog_url` 均优先，API key 只经子进程环境传递，不写入用户配置或命令行。
+- `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
+- `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
+- `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，使首页入口按官方读取逻辑恢复当前会话；ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
+- `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
+- `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
+- `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
+- `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
+- `patch-archive-delete.js` 让归档列表明确查询全部 Provider，避免切换 Provider 后旧归档被隐藏；新版上游已有原生删除链路时保持原样，旧版才补充永久删除入口。
+- `patch-updater.js` 区分更新方法与调用 Bundle，并在补丁后核对更新方法确实返回禁用状态；缺少目标或结构未知不再误报为已关闭。
+- `sync-upstream.js`、`fetch-msstore.js` 和 `build-from-upstream.js` 强化 Windows x64 官方包选择与固定来源校验，支持精确版本和已验证原始 MSIX 重放；包身份、大小或 SHA-256 不符时拒绝构建，运行检查通过前不生成最终 ZIP。
+- `windows-artifacts.js` 与 `windows-maintenance.js` 记录官方来源和候选产物哈希，生成候选、验证发布门槛，并保证正式发布复用已经验收的同一 ZIP。
+- `windows-runtime-checks.js` 检查 Windows EXE / 原生模块架构及未修改组件哈希，实际加载 CUA、运行 code-mode host / rg 基础命令，并执行空白隔离桌面的启动、就绪和退出冒烟。
+- `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径，避免只凭补丁脚本成功退出判断功能可用。
+- `storage-governance.js` 审计本地缓存、构建目录和取证日志；清理模式只处理可重建缓存/构建中间结果、旧隔离验收数据和确认中断的临时目录，下载与验收运行各保留最近两次、取证日志保留最近 7 天并限制单文件大小，正式制品及当前与上一版程序不参与清理。
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
 - 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
 

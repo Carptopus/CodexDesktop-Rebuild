@@ -17,6 +17,7 @@ const path = require("path");
 const { execSync, execFileSync } = require("child_process");
 const { findUpstreamCodex, getCodexBinarySource } = require("./codex-binary-policy");
 const { validateWindowsPackage } = require("./sync-upstream");
+const { validateSource } = require("./windows-artifacts");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -232,7 +233,9 @@ function buildMac(platform) {
   }
 
   // 1. Find the .app in the ZIP extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
+  const tempDir = process.env.CODEX_SYNC_DIR
+    ? path.resolve(process.env.CODEX_SYNC_DIR)
+    : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
   const extractDir = path.join(tempDir, `${variant}-extract`);
 
@@ -304,7 +307,7 @@ function buildMac(platform) {
 
 // ─── Windows build ──────────────────────────────────────────────
 
-function buildWin(platform) {
+function buildWin(platform, { deferZip = false } = {}) {
   const platformDir = path.join(SRC_DIR, platform);
   const asarDir = path.join(platformDir, "_asar");
 
@@ -314,7 +317,9 @@ function buildWin(platform) {
   }
 
   // Windows: use the MSIX extract cache
-  const tempDir = path.join(require("os").tmpdir(), "codex-sync");
+  const tempDir = process.env.CODEX_SYNC_DIR
+    ? path.resolve(process.env.CODEX_SYNC_DIR)
+    : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
   const extractDir = path.join(tempDir, "win-extract");
   const appDir = path.join(extractDir, "app");
 
@@ -329,8 +334,12 @@ function buildWin(platform) {
 
   // 即使绕过同步步骤，也禁止将旧的 ARM64 缓存打包成 x64 产物。
   try {
+    const sourcePath = path.join(extractDir, "verified-windows-source.json");
+    const expected = process.env.CODEX_REQUIRE_PINNED_SOURCE === "1"
+      ? validateSource(JSON.parse(fs.readFileSync(sourcePath, "utf8")))
+      : { architecture: "x64" };
     const identity = validateWindowsPackage(extractDir, {
-      architecture: "x64",
+      ...expected,
     });
     console.log(`   [verify] MSIX ${identity.architecture}, version ${identity.version}`);
   } catch (e) {
@@ -374,6 +383,8 @@ function buildWin(platform) {
 
   // 保留上游 Windows CLI，使 app-server、code-mode host 与本地工具运行时版本一致。
   keepUpstreamCodex(platform, resourcesDir, "codex.exe");
+
+  if (deferZip) { console.log("   [verify] ZIP deferred until real Windows runtime checks pass"); return; }
 
   // Create ZIP
   const version = getVersion(asarDir);
@@ -534,7 +545,7 @@ function main() {
   if (platform.startsWith("mac")) {
     buildMac(platform);
   } else {
-    buildWin(platform);
+    buildWin(platform, { deferZip: args.includes("--defer-zip") });
   }
 }
 
@@ -544,6 +555,7 @@ module.exports = {
   assertWindowsPortableRuntime,
   computeAsarHeaderHash,
   createDmg,
+  createZip,
   ensureWindowsPortableLauncher,
   isOwlRuntime,
   isRetryableHdiutilError,

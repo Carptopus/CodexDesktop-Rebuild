@@ -147,7 +147,8 @@ function ensureVendorExtracted(platform) {
   }
 
   console.log(`   [vendor] fetching ${spec} via npm pack...`);
-  const tmpDir = path.join(require("os").tmpdir(), "cometix-codex-pack");
+  const tmpDir = path.join(PROJECT_ROOT, ".cache", "vendor-pack");
+  if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
 
   try {

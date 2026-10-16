@@ -5,6 +5,7 @@ Codex.app/
 node_modules/
 
 # Build outputs
+/build/
 out/
 out-*/
 dist/
@@ -45,3 +46,13 @@ resources/bin/
 resources/codex
 resources/codex.exe
 .claude/
+
+# Local tools, upstream packages, candidates and isolated acceptance data
+7-Zip/
+.cache/
+artifacts/
+/acceptance/
+/release/archive/
+
+# Private maintenance documents and machine-local tools; never commit
+/local/

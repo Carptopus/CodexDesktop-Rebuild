@@ -31,8 +31,9 @@ const { SRC_DIR, relPath } = require("./patch-util");
 const LEGACY_MARKERS = [
   "__CODEX_CRASH_FORENSICS__",
   "__CODEX_CRASH_FORENSICS_V2__",
+  "__CODEX_CRASH_FORENSICS_V3__",
 ];
-const MARKER = "__CODEX_CRASH_FORENSICS_V3__";
+const MARKER = "__CODEX_CRASH_FORENSICS_V4__";
 
 // ──────────────────────────────────────────────
 //  注入体：以真实函数形式书写，保证语法正确。
@@ -61,9 +62,31 @@ function __codexForensics() {
       "forensics-" + new Date().toISOString().slice(0, 10) + ".log",
     );
     var chromeLog = path.join(earlyDir, "chrome-debug.log");
+    var MAX_LOG_BYTES = 16 * 1024 * 1024;
+    var MAX_LOG_FILES = 7;
+
+    // 取证是辅助数据：只保留最近 7 天，每个日志最多 16MB。
+    try {
+      var oldLogs = fs
+        .readdirSync(earlyDir)
+        .filter(function (name) {
+          return /^forensics-\d{4}-\d{2}-\d{2}\.log$/.test(name);
+        })
+        .sort()
+        .reverse();
+      for (var oldIndex = MAX_LOG_FILES; oldIndex < oldLogs.length; oldIndex++) {
+        try {
+          fs.unlinkSync(path.join(earlyDir, oldLogs[oldIndex]));
+        } catch (e) {}
+      }
+      if (fs.existsSync(chromeLog) && fs.statSync(chromeLog).size >= MAX_LOG_BYTES) {
+        fs.writeFileSync(chromeLog, "");
+      }
+    } catch (e) {}
 
     function write(line) {
       try {
+        if (fs.existsSync(logFile) && fs.statSync(logFile).size >= MAX_LOG_BYTES) return;
         fs.appendFileSync(
           logFile,
           "[" + new Date().toISOString() + "] " + line + "\n",
@@ -462,13 +485,11 @@ function __codexForensics() {
   } catch (err) {
     // 取证代码自身绝不能拖垮应用
     try {
-      require("node:fs").appendFileSync(
-        require("node:path").join(
-          require("node:os").tmpdir(),
-          "codex-forensics-fatal.log",
-        ),
-        String((err && err.stack) || err) + "\n",
-      );
+      var fatalFs = require("node:fs");
+      var fatalFile = require("node:path").join(require("node:os").tmpdir(), "codex-forensics-fatal.log");
+      if (!fatalFs.existsSync(fatalFile) || fatalFs.statSync(fatalFile).size < 1024 * 1024) {
+        fatalFs.appendFileSync(fatalFile, String((err && err.stack) || err) + "\n");
+      }
     } catch (e) {}
   }
 }

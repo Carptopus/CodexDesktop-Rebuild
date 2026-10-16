@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * patch-archive-delete.js — 为旧版归档会话列表补充删除能力。
+ * patch-archive-delete.js — 补齐跨 Provider 归档列表与旧版删除能力。
  *
- * Two-layer patch:
+ * Three-layer patch:
+ *   0. archived thread queries: use [] to explicitly query all model providers
  *   1. app-main chunk: inject "delete-conversation" route into the message router
  *   2. data-controls chunk: inject a red "Delete" button next to "Unarchive"
  *
@@ -13,8 +14,166 @@
  * 26.803 起上游已提供单条、按项目及全部删除；检测到完整原生链路时不再注入。
  */
 const fs = require("fs");
+const path = require("path");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+
+function walkArchive(node, visitor) {
+  if (!node || typeof node !== "object") return;
+  if (node.type) visitor(node);
+  for (const [key, child] of Object.entries(node)) {
+    if (key === "type" || key === "start" || key === "end") continue;
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        if (item && typeof item === "object" && item.type) {
+          walkArchive(item, visitor);
+        }
+      }
+    } else if (child && typeof child === "object" && child.type) {
+      walkArchive(child, visitor);
+    }
+  }
+}
+
+function archiveLiteral(node) {
+  if (node?.type === "Literal") return node.value;
+  if (
+    node?.type === "TemplateLiteral" &&
+    node.expressions.length === 0 &&
+    node.quasis.length === 1
+  ) {
+    return node.quasis[0].value.cooked;
+  }
+  return undefined;
+}
+
+function archiveObjectProperty(node, name) {
+  if (node?.type !== "ObjectExpression") return null;
+  return node.properties.find((property) => {
+    if (property.type !== "Property" || property.kind !== "init") return false;
+    const key = property.computed
+      ? archiveLiteral(property.key)
+      : property.key.type === "Identifier"
+        ? property.key.name
+        : archiveLiteral(property.key);
+    return key === name;
+  }) ?? null;
+}
+
+function archiveStaticBoolean(node) {
+  if (node?.type === "Literal" && typeof node.value === "boolean") {
+    return node.value;
+  }
+  if (
+    node?.type === "UnaryExpression" &&
+    node.operator === "!" &&
+    node.argument?.type === "Literal" &&
+    (node.argument.value === 0 || node.argument.value === 1)
+  ) {
+    return node.argument.value === 0;
+  }
+  return null;
+}
+
+function analyzeArchivedListProviders(source) {
+  const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const edits = [];
+  let alreadyAllProviders = 0;
+
+  walkArchive(ast, (node) => {
+    if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") {
+      return;
+    }
+    const method = node.callee.computed
+      ? archiveLiteral(node.callee.property)
+      : node.callee.property.name;
+    const options = method === "listAllThreads"
+      ? node.arguments[0]
+      : method === "sendRequest" && archiveLiteral(node.arguments[0]) === "thread/list"
+        ? node.arguments[1]
+        : null;
+    if (archiveStaticBoolean(archiveObjectProperty(options, "archived")?.value) !== true) {
+      return;
+    }
+
+    const providers = archiveObjectProperty(options, "modelProviders")?.value;
+    if (providers?.type === "Literal" && providers.value === null) {
+      edits.push(providers);
+    } else if (providers?.type === "ArrayExpression" && providers.elements.length === 0) {
+      alreadyAllProviders++;
+    }
+  });
+
+  let code = source;
+  for (const edit of edits.sort((left, right) => right.start - left.start)) {
+    code = code.slice(0, edit.start) + "[]" + code.slice(edit.end);
+  }
+  return { code, edits: edits.length, alreadyAllProviders };
+}
+
+function patchArchivedListProviders(source) {
+  return analyzeArchivedListProviders(source).code;
+}
+
+function locateArchivedProviderBundles(platform) {
+  const platforms = platform
+    ? [platform]
+    : ["mac-arm64", "mac-x64", "win"].filter((name) =>
+        fs.existsSync(path.join(SRC_DIR, name)),
+      );
+  const roots = platforms.length > 0
+    ? platforms.map((name) => ({
+        platform: name,
+        dir: path.join(SRC_DIR, name, "_asar", "webview", "assets"),
+      }))
+    : [{ platform: "legacy", dir: path.join(SRC_DIR, "webview", "assets") }];
+  const bundles = [];
+
+  for (const root of roots) {
+    if (!fs.existsSync(root.dir)) continue;
+    for (const name of fs.readdirSync(root.dir)) {
+      if (!name.endsWith(".js")) continue;
+      const filePath = path.join(root.dir, name);
+      const source = fs.readFileSync(filePath, "utf-8");
+      if (
+        source.includes("modelProviders") &&
+        (source.includes("listAllThreads") || source.includes("thread/list"))
+      ) {
+        bundles.push({ platform: root.platform, path: filePath });
+      }
+    }
+  }
+  return bundles.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function patchArchivedProviderQueries(bundles, isCheck) {
+  let patched = 0;
+  let already = 0;
+  for (const bundle of bundles) {
+    const source = fs.readFileSync(bundle.path, "utf-8");
+    const result = analyzeArchivedListProviders(source);
+    if (result.edits > 0) {
+      console.log(
+        `  [${isCheck ? "?" : "ok"}] ${relPath(bundle.path)}: ` +
+        `${isCheck ? "would query" : "queries"} all providers for ` +
+        `${result.edits} archived list call(s)`,
+      );
+      if (!isCheck) fs.writeFileSync(bundle.path, result.code, "utf-8");
+      patched += result.edits;
+    }
+    if (result.alreadyAllProviders > 0) {
+      console.log(
+        `  [ok] ${relPath(bundle.path)}: ${result.alreadyAllProviders} archived list ` +
+        "call(s) already query all providers",
+      );
+      already += result.alreadyAllProviders;
+    }
+  }
+  if (patched === 0 && already === 0) {
+    throw new Error("archived list provider query target not found");
+  }
+  return { patched, already };
+}
 
 function hasNativeArchiveDelete(code) {
   const legacyMarkers = [
@@ -315,6 +474,12 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
+  console.log("  [layer 0] archived lists: query all model providers");
+  const providerResult = patchArchivedProviderQueries(
+    locateArchivedProviderBundles(platform),
+    isCheck,
+  );
+
   const dataControlsBundles = locateBundles({
     dir: "assets",
     pattern: /^data-controls-.*\.js$/,
@@ -347,10 +512,18 @@ function main() {
   );
 
   console.log(
-    `  [done] native: ${nativeBundles.length}, routes: ${routePatched}, buttons: ${btnPatched}`,
+    `  [done] providers: ${providerResult.patched} patched/${providerResult.already} already, ` +
+    `native: ${nativeBundles.length}, routes: ${routePatched}, buttons: ${btnPatched}`,
   );
 }
 
 if (require.main === module) main();
 
-module.exports = { hasNativeArchiveDelete, patchAppMain, patchDataControls };
+module.exports = {
+  analyzeArchivedListProviders,
+  hasNativeArchiveDelete,
+  patchAppMain,
+  patchArchivedListProviders,
+  patchArchivedProviderQueries,
+  patchDataControls,
+};

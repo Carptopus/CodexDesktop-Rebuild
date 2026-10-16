@@ -22,6 +22,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { execSync, execFileSync } = require("child_process");
+const { verifySourceFile, writeJson } = require("./windows-artifacts");
 
 // TLS certs for MS delivery CDN
 const certsDir = path.join(__dirname, "certs");
@@ -34,7 +35,9 @@ https.globalAgent.options.ca = extraCAs;
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
-const TEMP_DIR = path.join(require("os").tmpdir(), "codex-sync");
+const TEMP_DIR = process.env.CODEX_SYNC_DIR
+  ? path.resolve(process.env.CODEX_SYNC_DIR)
+  : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
@@ -209,6 +212,20 @@ function clearDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function removeObsoletePackages(currentFile, pattern) {
+  if (!fs.existsSync(TEMP_DIR)) return [];
+  const keep = path.resolve(currentFile);
+  const removed = [];
+  for (const entry of fs.readdirSync(TEMP_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || !pattern.test(entry.name)) continue;
+    const file = path.join(TEMP_DIR, entry.name);
+    if (path.resolve(file) === keep) continue;
+    fs.rmSync(file, { force: true });
+    removed.push(entry.name);
+  }
+  return removed;
+}
+
 function countFiles(dir) {
   let n = 0;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -339,13 +356,15 @@ async function getAppcastVersion(url) {
   };
 }
 
-async function getWindowsVersion() {
+async function getWindowsVersion(expectedVersion) {
   const msstore = require("./fetch-msstore");
   const cookie = await msstore.getCookie();
   const info = await msstore.getAppInfo("9plm9xgg6vks", "US");
   if (!info.categoryId) throw new Error("No CategoryID");
   const pkgs = await msstore.getFileList(cookie, info.categoryId, "Retail");
-  const pkg = selectWindowsPackage(pkgs);
+  const pkg = selectWindowsPackage(expectedVersion
+    ? pkgs.filter((item) => item.name.startsWith(`OpenAI.Codex_${expectedVersion}_x64__`))
+    : pkgs);
   const url = await msstore.getDownloadUrl(pkg.updateID, pkg.revisionNumber, "Retail", pkg.digest);
   if (!url) throw new Error(`No download URL for Windows x64 package: ${pkg.name}`);
   const verMatch = pkg.name.match(/_(\d+\.\d+\.\d+(?:\.\d+)?)_/);
@@ -355,13 +374,22 @@ async function getWindowsVersion() {
     url,
     packageName: pkg.name,
     architecture: WINDOWS_TARGET_ARCH,
+    size: Number(pkg.size),
+    storeDigest: pkg.digest,
   };
 }
 
 function selectWindowsPackage(pkgs) {
-  const pkg = pkgs.find(({ name }) =>
+  const pkg = pkgs.filter(({ name }) =>
     typeof name === "string" && WINDOWS_X64_MSIX_RE.test(name)
-  );
+  ).sort((left, right) => {
+    const a = left.name.match(/_(\d+(?:\.\d+){2,3})_/)[1].split(".").map(Number);
+    const b = right.name.match(/_(\d+(?:\.\d+){2,3})_/)[1].split(".").map(Number);
+    for (let index = 0; index < 4; index++) {
+      if ((a[index] || 0) !== (b[index] || 0)) return (b[index] || 0) - (a[index] || 0);
+    }
+    return left.name.localeCompare(right.name);
+  })[0];
 
   if (pkg) return pkg;
 
@@ -422,6 +450,8 @@ async function syncMac(variant, appcastUrl, destDir) {
 
   const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
   const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
+  const variantPattern = new RegExp(`^Codex-${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-.*\\.zip$`, "i");
+  removeObsoletePackages(zipPath, variantPattern);
 
   if (!fs.existsSync(zipPath)) {
     curlDownload(info.url, zipPath, label);
@@ -449,12 +479,18 @@ async function syncWin(destDir, info) {
 
   const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
   const extractDir = path.join(TEMP_DIR, "win-extract");
+  removeObsoletePackages(msixPath, /^OpenAI\.Codex_.*_x64__.*\.msix$/i);
 
-  if (!fs.existsSync(msixPath)) {
+  if (info.localPackage) {
+    await verifySourceFile(info, info.localPackage);
+    if (path.resolve(info.localPackage) !== path.resolve(msixPath)) fs.copyFileSync(info.localPackage, msixPath);
+  } else if (!fs.existsSync(msixPath)) {
     curlDownload(info.url, msixPath, "Windows MSIX");
   } else {
     console.log(`   [cache] ${msixPath}`);
   }
+
+  if (info.sha256) await verifySourceFile(info, msixPath);
 
   console.log("   [unzip]");
   clearDir(extractDir);
@@ -470,6 +506,7 @@ async function syncWin(destDir, info) {
   }
 
   assembleOutput(resourcesDir, destDir, "Windows");
+  if (info.sha256) writeJson(path.join(extractDir, "verified-windows-source.json"), info);
   return info;
 }
 
@@ -586,9 +623,12 @@ async function main() {
 }
 
 module.exports = {
+  getWindowsVersion,
+  syncWin,
   readWindowsPackageIdentity,
   selectWindowsPackage,
   validateWindowsPackage,
+  removeObsoletePackages,
 };
 
 if (require.main === module) {
