@@ -28,6 +28,8 @@
     "test": "node --test scripts/*.test.js",
     "check": "node scripts/check-scripts.js",
     "test:maintenance": "node scripts/maintenance-smoke.js",
+    "storage:audit": "node scripts/storage-governance.js audit",
+    "storage:clean": "node scripts/storage-governance.js clean",
     "windows:check-update": "node scripts/windows-maintenance.js discover",
     "windows:candidate": "node scripts/windows-maintenance.js candidate",
     "windows:verify-release": "node scripts/windows-maintenance.js verify-release",

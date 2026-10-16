@@ -52,6 +52,7 @@ resources/codex.exe
 .cache/
 artifacts/
 /acceptance/
+/release/archive/
 
 # Private maintenance documents and machine-local tools; never commit
 /local/

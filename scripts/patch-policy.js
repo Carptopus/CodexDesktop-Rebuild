@@ -33,7 +33,7 @@ const PATCH_POLICY = [
   { script: "patch-remote-control.js", feature: "远程控制" },
   { script: "patch-composer-workspace-root.js", feature: "会话工作目录传递" },
   { script: "patch-updater.js", feature: "禁用上游自动更新" },
-  { script: "patch-archive-delete.js", feature: "归档会话删除" },
+  { script: "patch-archive-delete.js", feature: "跨 Provider 归档列表与归档删除" },
   { script: "patch-crash-forensics.js", feature: "主进程崩溃诊断" },
   { script: "patch-worker-forensics.js", feature: "Worker 崩溃诊断" },
   { script: "patch-worker-limits.js", feature: "Worker 内存限制" },

@@ -235,7 +235,7 @@ function buildMac(platform) {
   // 1. Find the .app in the ZIP extract cache
   const tempDir = process.env.CODEX_SYNC_DIR
     ? path.resolve(process.env.CODEX_SYNC_DIR)
-    : path.join(require("os").tmpdir(), "codex-sync");
+    : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
   const extractDir = path.join(tempDir, `${variant}-extract`);
 
@@ -319,7 +319,7 @@ function buildWin(platform, { deferZip = false } = {}) {
   // Windows: use the MSIX extract cache
   const tempDir = process.env.CODEX_SYNC_DIR
     ? path.resolve(process.env.CODEX_SYNC_DIR)
-    : path.join(require("os").tmpdir(), "codex-sync");
+    : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
   const extractDir = path.join(tempDir, "win-extract");
   const appDir = path.join(extractDir, "app");
 

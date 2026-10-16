@@ -172,12 +172,15 @@ function patchSource(source) {
     }
     const baseBlock = contextGate.gate;
     const hardBlock = unique(declarations.filter(node => {
-      if (!referenced.has(node.id.name) || node.init?.type !== "CallExpression" ||
-        node.init.arguments.length !== 1) return false;
-      const terms = nodes(node.init.arguments[0], child => child.type === "BinaryExpression" &&
+      if (!referenced.has(node.id.name) || node.init == null) return false;
+      const terms = nodes(node.init, child => child.type === "BinaryExpression" &&
         ["===", "=="].includes(child.operator) && child.left?.type === "Identifier" &&
         child.left.name === host.name && value(child.right) === "local");
-      return terms.length === 1;
+      // 26.1007 使用 read(hardBlockAtom) && host === "local"；后续版本
+      // 改成 value(host === "local" && hardBlockAtom)。两者都必须同时包含
+      // 唯一的本地主机门槛和真实读取调用，避免按变量名猜测。
+      return terms.length === 1 && nodes(node.init,
+        child => child.type === "CallExpression").length === 1;
     }), "Host quota gate");
     const scopes = [...new Set(ownNodes.filter(node => property(node) === "kind" &&
       property(unwrap(node).object) === "value")

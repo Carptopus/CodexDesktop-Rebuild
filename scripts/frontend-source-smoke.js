@@ -81,11 +81,20 @@ function verifyFrontendSource(assets) {
   assert.equal(navigationEntries.length, 1);
   const navigationSource = fs.readFileSync(path.join(assets, navigationEntries[0]), "utf8");
   assert.match(navigationSource, /\|\|\/\* Codex：API-key 首页恢复写入。 \*\/[A-Za-z_$][\w$]*===`apikey`/);
+  assert.match(navigationSource, /authMethod:__codexAuthMethod/);
   assert.match(navigationSource,
-    /\/\* Codex：API-key 当前首页保持会话。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*===`home`&&[A-Za-z_$][\w$]*!=null&&\([A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/local\/`\)\|\|[A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/remote\/`\)\)/);
+    /\/\* Codex：API-key 当前首页保持会话。 \*\/__codexAuthMethod===`apikey`&&[A-Za-z_$][\w$]*!=null&&\([A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/local\/`\)\|\|[A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/remote\/`\)\)/);
+  const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
+    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
+  assert.equal(serviceTierEntries.length, 1);
+  const serviceTierSource = fs.readFileSync(path.join(assets, serviceTierEntries[0]), "utf8");
+  assert.match(serviceTierSource, /CodexRebuildServiceTierApiKeyAuth/);
+  assert.match(serviceTierSource, /CodexRebuildServiceTierApiKeyAccess/);
+  assert.match(serviceTierSource, /\{fast:!0,ultrafast:!0\}\/\* CodexRebuildServiceTierApiKeyRequest \*\//);
   const accentModule = fs.readFileSync(path.join(assets, "codex-rebuild-accent-presets.js"), "utf8");
   assert.match(accentModule, /codex-rebuild:accent-preset:v1/);
   assert.match(accentModule, /export function resolveAccentPreset/);
+  assert.match(accentModule, /preset === "default" \? "blue" : preset/);
   assert.doesNotMatch(accentModule, /getComputedStyle|#[0-9a-f]{6}/i);
   const readingModule = fs.readFileSync(path.join(assets, "codex-rebuild-reading-width.js"), "utf8");
   assert.match(readingModule, /MIN_WIDTH_PERCENT = 50/);
@@ -100,7 +109,7 @@ function verifyFrontendSource(assets) {
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
-  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
+  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
 if (require.main === module) console.log(JSON.stringify(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")), null, 2));
 module.exports = { verifyFrontendSource };

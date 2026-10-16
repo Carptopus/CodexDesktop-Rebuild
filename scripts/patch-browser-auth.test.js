@@ -1,7 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { patchSource } = require("./patch-browser-auth");
+const {
+  hasNativeManagedRequestHeaders,
+  patchSource,
+} = require("./patch-browser-auth");
 
 function createService(identityPromise, gateValue = true) {
   return [
@@ -98,4 +101,24 @@ test("未知上游结构会明确失败而不是静默漏补", () => {
   ].join("");
 
   assert.equal(patchSource(source).status, "unexpected-shape");
+});
+
+test("26.1013 原生托管请求头不再依赖 ChatGPT 身份 gate", () => {
+  const source = [
+    "class Preferences{async getExtensionRequestHeaders(){",
+    "return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders",
+    "}}",
+    "class BrowserTransport{async sendSessionRequest(){",
+    "const headers=await this.preferences.getExtensionRequestHeaders();",
+    "if(this.clientInfo.requestHeadersVersion===1)this.params.request_headers=headers;",
+    "}}",
+    'async function readBrowserFeatureGate(){throw new Error("Browser feature gates require caller identity.")}',
+  ].join("");
+
+  assert.equal(hasNativeManagedRequestHeaders(source), true);
+  assert.equal(patchSource(source).status, "not-applicable");
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace("readRequirements", "readAccountIdentity")),
+    false,
+  );
 });

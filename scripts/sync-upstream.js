@@ -37,7 +37,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
 const TEMP_DIR = process.env.CODEX_SYNC_DIR
   ? path.resolve(process.env.CODEX_SYNC_DIR)
-  : path.join(require("os").tmpdir(), "codex-sync");
+  : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
@@ -210,6 +210,20 @@ function copyRecursive(src, dest) {
 function clearDir(dir) {
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
   fs.mkdirSync(dir, { recursive: true });
+}
+
+function removeObsoletePackages(currentFile, pattern) {
+  if (!fs.existsSync(TEMP_DIR)) return [];
+  const keep = path.resolve(currentFile);
+  const removed = [];
+  for (const entry of fs.readdirSync(TEMP_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || !pattern.test(entry.name)) continue;
+    const file = path.join(TEMP_DIR, entry.name);
+    if (path.resolve(file) === keep) continue;
+    fs.rmSync(file, { force: true });
+    removed.push(entry.name);
+  }
+  return removed;
 }
 
 function countFiles(dir) {
@@ -436,6 +450,8 @@ async function syncMac(variant, appcastUrl, destDir) {
 
   const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
   const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
+  const variantPattern = new RegExp(`^Codex-${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-.*\\.zip$`, "i");
+  removeObsoletePackages(zipPath, variantPattern);
 
   if (!fs.existsSync(zipPath)) {
     curlDownload(info.url, zipPath, label);
@@ -463,6 +479,7 @@ async function syncWin(destDir, info) {
 
   const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
   const extractDir = path.join(TEMP_DIR, "win-extract");
+  removeObsoletePackages(msixPath, /^OpenAI\.Codex_.*_x64__.*\.msix$/i);
 
   if (info.localPackage) {
     await verifySourceFile(info, info.localPackage);
@@ -611,6 +628,7 @@ module.exports = {
   readWindowsPackageIdentity,
   selectWindowsPackage,
   validateWindowsPackage,
+  removeObsoletePackages,
 };
 
 if (require.main === module) {

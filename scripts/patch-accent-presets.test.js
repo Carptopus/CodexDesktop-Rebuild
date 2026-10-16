@@ -139,7 +139,7 @@ test("本地设置、账户优先和自定义清理使用同一预设状态", as
   assert.equal(storage.values.has(runtime.ACCENT_PRESET_STORAGE_KEY), false);
 });
 
-test("预设解析保留名称语义并拒绝无效本地值", async () => {
+test("预设解析补齐官方默认有效色并拒绝无效本地值", async () => {
   const runtime = await runtimeModule();
   const storage = fakeStorage({ [runtime.ACCENT_PRESET_STORAGE_KEY]: "blue" });
   globalThis.localStorage = storage;
@@ -147,10 +147,13 @@ test("预设解析保留名称语义并拒绝无效本地值", async () => {
   assert.equal(runtime.resolveAccentPreset("chatgpt", "green"), "green");
   assert.equal(runtime.resolveAccentPreset("custom", "green"), null);
 
-  for (const preset of ["default", "blue", "black"]) {
+  for (const preset of ["blue", "black"]) {
     storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);
     assert.equal(runtime.resolveAccentPreset("custom", null), preset);
   }
+  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "default");
+  assert.equal(runtime.accentPresetSelection(null, "custom"), "default");
+  assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "not-a-preset");
   assert.equal(runtime.resolveAccentPreset("custom", null), null);
 });
@@ -177,9 +180,12 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
   const accountCustom = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", "green");
   assert.equal(accountCustom["--color-background-user-message"], "neutral-bubble");
 
-  for (const preset of ["default", "blue", "black"]) {
+  for (const preset of ["blue", "black"]) {
     storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);
     const rendered = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
     assert.equal(rendered["--color-background-user-message"], `#${preset}-bubble`);
   }
+  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "default");
+  const localDefault = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
+  assert.equal(localDefault["--color-background-user-message"], "#blue-bubble");
 });

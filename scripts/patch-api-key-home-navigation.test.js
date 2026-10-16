@@ -19,6 +19,13 @@ function fixture() {
     "(c.state?.sidebarProductMode==null||c.state.sidebarProductMode===a))return!0;",
     "if(u==null||!s&&u.departedAt==null||Ati(e,u.location)!==r){i(`/`);return!0}",
     "return i(ym(u.location)),!0}",
+    "function wti(e,{codexLocalAccessStatus:t,currentMode:n,navigate:r,nextMode:i,openHome:a=!1,restoreNavigation:o=!0,startNewConversation:s}){",
+    "let c=e.get(wc);if(i===n&&!a)return;dei(e);let l=e.get(Pti,i),u=e.get(Ug),d=e.get(ye),",
+    "f=u?.pathname===`/library`||u?.pathname.startsWith(`/library/`);",
+    "if(u!=null&&!f&&e.set(Pti,n,{location:u,selectedProject:d}),SFe(e,i),a){r(`/`,{state:{sidebarProductMode:i}});return}",
+    "if(!o)return;if(l==null){s();return}r(l.location)}",
+    "function Pjo(){let i=store(),h=navigate(),a=start(),{accountId:O,authMethod:k}=mp(),",
+    "c=()=>{wti(i,{codexLocalAccessStatus:`allowed`,currentMode:`codex`,navigate:h,nextMode:`codex`,openHome:!0,startNewConversation:a})};return c}",
   ].join("");
 }
 
@@ -43,125 +50,80 @@ test("API-key 在 ChatGPT capability 关闭时仍写入与读取端一致的 acc
   assert.equal(patchSource(result.source).status, "already-patched");
 });
 
-function restore(source, accountKey, {
+function clickHome(source, authMethod, {
   currentPath = "/local/thread-1",
-  currentHash = "",
-  currentState = null,
-  newNavigation = false,
-  sanitizedHash = currentHash,
-  saved = { departedAt: null, location: { pathname: "/local/thread-1" } },
 } = {}) {
   const navigations = [];
-  const current = currentPath == null ? null : {
-    hash: currentHash,
-    pathname: currentPath,
-    state: currentState,
-  };
+  const current = currentPath == null ? null : { pathname: currentPath };
   const store = {
     get(key) {
-      if (key === "wc") return newNavigation;
+      if (key === "wc") return false;
       if (key === "Ug") return current;
-      if (key === "lj") return "codex";
       return null;
     },
+    set() {},
   };
-  const run = Function("store", "navigate", "accountKey", "saved", "sanitizedHash", [
-    "const wc=`wc`,Ug=`Ug`,lj=`lj`;",
-    "const bti=()=>saved;",
-    "const sti=()=>({hash:sanitizedHash});",
-    "const Ati=(_store,location)=>location.pathname===`/`||location.pathname.startsWith(`/local/`)||location.pathname.startsWith(`/remote/`)?`home`:null;",
-    "const ym=location=>location.pathname;",
+  const run = Function("activeStore", "recordNavigation", "authMethod", [
+    "const wc=`wc`,Ug=`Ug`,Pti=`Pti`,ye=`ye`;",
+    "const store=()=>activeStore,navigate=()=>path=>recordNavigation(path),start=()=>()=>{};",
+    "const mp=()=>({accountId:null,authMethod});const dei=()=>{},SFe=()=>{};",
     source,
-    "return Sti(store,{accountKey,area:`home`,navigate,productMode:`codex`});",
+    "return Pjo()();",
   ].join(""));
-  return {
-    navigations,
-    value: run(store, path => navigations.push(path), accountKey, saved, sanitizedHash),
-  };
+  run(store, path => navigations.push(path), authMethod);
+  return navigations;
 }
 
-test("API-key 旧导航模式下点击首页保持当前会话", () => {
+test("API-key 点击真实侧栏房子按钮保持当前本地会话", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey");
 
   assert.ok(result.source.includes(CURRENT_HOME_MARKER));
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, []);
+  assert.match(result.source, /authMethod:__codexAuthMethod/);
+  assert.match(result.source, /authMethod:k/);
+  assert.deepEqual(clickHome(result.source, "apikey"), []);
 });
 
 test("API-key 远程会话点击首页保持当前会话", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
+  const navigations = clickHome(result.source, "apikey", {
     currentPath: "/remote/task-1",
   });
 
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, []);
-});
-
-test("API-key 会话短路不依赖 hash 和 sidebarProductMode", () => {
-  const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
-    currentHash: "#panel=diff",
-    currentState: { sidebarProductMode: "other" },
-    newNavigation: true,
-    sanitizedHash: "",
-  });
-
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, []);
+  assert.deepEqual(navigations, []);
 });
 
 test("API-key 根路径不短路，保留官方空数据落地页导航", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
+  const navigations = clickHome(result.source, "apikey", {
     currentPath: "/",
-    saved: null,
   });
 
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, ["/"]);
+  assert.deepEqual(navigations, ["/"]);
 });
 
 test("API-key 尚无当前路由时不访问空对象", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
+  const navigations = clickHome(result.source, "apikey", {
     currentPath: null,
-    saved: null,
   });
 
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, ["/"]);
+  assert.deepEqual(navigations, ["/"]);
 });
 
-test("ChatGPT 旧导航模式不获得当前首页短路", () => {
+test("ChatGPT 登录不获得 API-key 房子按钮短路", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "chatgpt:account-1");
+  const navigations = clickHome(result.source, "chatgpt");
 
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, ["/"]);
+  assert.deepEqual(navigations, ["/"]);
 });
 
-test("API-key 从设置页仍恢复已经离开的首页会话", () => {
+test("API-key 从设置页点击房子仍执行官方首页导航", () => {
   const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
+  const navigations = clickHome(result.source, "apikey", {
     currentPath: "/settings/appearance",
-    saved: { departedAt: Date.now(), location: { pathname: "/local/thread-1" } },
   });
 
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, ["/local/thread-1"]);
-});
-
-test("API-key 非会话页面不获得当前首页短路", () => {
-  const result = patchSource(fixture());
-  const restored = restore(result.source, "auth:apikey", {
-    currentPath: "/projects/example",
-    saved: { departedAt: Date.now(), location: { pathname: "/local/thread-1" } },
-  });
-
-  assert.equal(restored.value, true);
-  assert.deepEqual(restored.navigations, ["/local/thread-1"]);
+  assert.deepEqual(navigations, ["/"]);
 });
 
 test("ChatGPT 登录继续遵守官方 capability 与账户条件", () => {
@@ -193,7 +155,9 @@ test("未认证及其他认证方式不会因补丁越过 capability", () => {
 });
 
 test("导航跟踪器不唯一时明确失败", () => {
-  const source = fixture() + fixture().replaceAll("Lhc", "Mhc").replaceAll("Sti", "Tti");
+  const source = fixture() + fixture()
+    .replaceAll("Lhc", "Mhc").replaceAll("Sti", "Tti")
+    .replaceAll("wti", "xti").replaceAll("Pjo", "Qjo");
   const result = patchSource(source);
 
   assert.equal(result.status, "unexpected-shape");

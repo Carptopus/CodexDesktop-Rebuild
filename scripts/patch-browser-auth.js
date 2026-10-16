@@ -11,6 +11,8 @@
  * 将 request-header 能力降级为关闭，恢复旧版可继续建立本地浏览器通道的行为。
  * 26.1007 将读取改为调用通用 feature-gate 函数；仅包装 request-header
  * 回调，不改变其他 feature gate 的身份要求或超时逻辑。
+ * 26.1013 改为从本地 requirements 读取托管请求头，不再经过 ChatGPT
+ * 身份 gate；检测到这条原生链路时只验证并保持上游实现。
  * 不会把 API key 当作 ChatGPT token 发送到 chatgpt.com。
  */
 const fs = require("fs");
@@ -22,6 +24,19 @@ const IDENTITY_ERROR =
   "Browser request-header policy requires caller identity.";
 const FEATURE_GATE_IDENTITY_ERROR = "Browser feature gates require caller identity.";
 const REQUEST_HEADER_GATE = "codex_browser_use_agent_request_header";
+const MANAGED_REQUEST_HEADER_MARKERS = [
+  "getExtensionRequestHeaders",
+  "readRequirements",
+  "requestHeadersVersion",
+  "request_headers",
+];
+
+function hasNativeManagedRequestHeaders(source) {
+  return (
+    !source.includes(REQUEST_HEADER_GATE) &&
+    MANAGED_REQUEST_HEADER_MARKERS.every((marker) => source.includes(marker))
+  );
+}
 
 function walk(node, visitor) {
   if (!node || typeof node !== "object") return;
@@ -216,10 +231,7 @@ function locateTargets(platform) {
     ];
     for (const root of roots) {
       for (const filePath of findBrowserServices(root)) {
-        const source = fs.readFileSync(filePath, "utf8");
-        if (source.includes(REQUEST_HEADER_GATE)) {
-          targets.push({ platform: name, path: filePath });
-        }
+        targets.push({ platform: name, path: filePath });
       }
     }
   }
@@ -236,16 +248,24 @@ function main() {
   const targets = locateTargets(platform);
 
   if (targets.length === 0) {
-    console.log("[ok] No browser request-header auth targets found");
-    return;
+    throw new Error("browser-service.mjs not found in external plugin resources");
   }
 
   let patched = 0;
   let alreadyPatched = 0;
+  let native = 0;
   for (const target of targets) {
     const source = fs.readFileSync(target.path, "utf8");
-    const result = patchSource(source);
     const label = `[${target.platform}] ${relPath(target.path)}`;
+    if (hasNativeManagedRequestHeaders(source)) {
+      console.log(
+        `[ok] ${label}: upstream reads managed request headers without ChatGPT identity`,
+      );
+      native++;
+      continue;
+    }
+
+    const result = patchSource(source);
 
     if (result.status === "patched") {
       if (check) {
@@ -267,7 +287,8 @@ function main() {
   }
 
   console.log(
-    `[ok] Browser auth targets: ${targets.length}, patched: ${patched}, already: ${alreadyPatched}`,
+    `[ok] Browser auth targets: ${targets.length}, native: ${native}, ` +
+    `patched: ${patched}, already: ${alreadyPatched}`,
   );
 }
 
@@ -275,8 +296,10 @@ if (require.main === module) main();
 
 module.exports = {
   IDENTITY_ERROR,
+  MANAGED_REQUEST_HEADER_MARKERS,
   REQUEST_HEADER_GATE,
   findRequestHeaderAuthPatches,
+  hasNativeManagedRequestHeaders,
   locateTargets,
   patchSource,
 };

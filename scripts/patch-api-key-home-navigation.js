@@ -4,10 +4,10 @@
  *
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
- * 同时，旧导航模式不会把“当前会话已经属于首页”视为已到达目标，最终让
- * 首页按钮落到空路由。这里只对 API-key 下已经位于 `/local/<id>` 或
- * `/remote/<id>` 的首页会话直接短路，不再依赖新导航开关、hash、区域推断或
- * sidebarProductMode；根路径和非会话页面仍执行官方导航。
+ * 同时，侧栏房子按钮使用独立的 openHome 分支直接导航到 `/`，不会进入
+ * 上述首页恢复函数。这里只给该按钮传入真实 authMethod，并在 API-key 已经
+ * 位于 `/local/<id>` 或 `/remote/<id>` 时短路；根路径和非会话页面仍执行
+ * 官方导航。
  * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
  */
 const fs = require("node:fs");
@@ -61,6 +61,13 @@ function templatePrefix(node, prefix, expressionName) {
 function objectBinding(pattern, name) {
   const property = pattern.properties.find(item => propertyName(item) === name);
   return property?.value?.type === "Identifier" ? property.value.name : null;
+}
+
+function optionBinding(pattern, name) {
+  const property = pattern.properties.find(item => propertyName(item) === name);
+  if (property?.value?.type === "Identifier") return property.value.name;
+  return property?.value?.type === "AssignmentPattern" && property.value.left?.type === "Identifier"
+    ? property.value.left.name : null;
 }
 
 function unique(items, label) {
@@ -117,11 +124,9 @@ function findTracker(ast) {
   return candidates[0] ?? null;
 }
 
-function returnsTrue(statement) {
-  if (statement?.type !== "ReturnStatement") return false;
-  if (literal(statement.argument) === true) return true;
-  return statement.argument?.type === "UnaryExpression" && statement.argument.operator === "!" &&
-    literal(statement.argument.argument) === 0;
+function isTrue(node) {
+  return literal(node) === true || node?.type === "UnaryExpression" &&
+    node.operator === "!" && literal(node.argument) === 0;
 }
 
 function memberName(node) {
@@ -129,6 +134,11 @@ function memberName(node) {
   if (node?.type !== "MemberExpression") return null;
   if (!node.computed && node.property.type === "Identifier") return node.property.name;
   return literal(node.property);
+}
+
+function memberObject(node) {
+  if (node?.type === "ChainExpression") node = node.expression;
+  return node?.type === "MemberExpression" ? node.object : null;
 }
 
 function memberRoot(node) {
@@ -139,93 +149,80 @@ function memberRoot(node) {
   return current?.type === "Identifier" ? current.name : null;
 }
 
-function logicalTerms(node, operator) {
-  if (node?.type !== "LogicalExpression" || node.operator !== operator) return [node];
-  return [...logicalTerms(node.left, operator), ...logicalTerms(node.right, operator)];
+function objectProperty(node, name) {
+  return node?.properties?.find(property => propertyName(property) === name) ?? null;
 }
 
-function isComparison(node, identifier, operator, value) {
-  return node?.type === "BinaryExpression" && node.operator === operator &&
-    node.left?.type === "Identifier" && node.left.name === identifier &&
-    (value === null ? node.right?.type === "Literal" && node.right.value === null :
-      literal(node.right) === value);
-}
-
-function isPathPrefixCheck(node, currentLocation, prefix) {
-  return node?.type === "CallExpression" && node.arguments.length === 1 &&
-    literal(node.arguments[0]) === prefix && memberName(node.callee) === "startsWith" &&
-    node.callee.object?.type === "MemberExpression" &&
-    memberName(node.callee.object) === "pathname" &&
-    memberRoot(node.callee.object) === currentLocation;
-}
-
-function isCurrentHomeOverride(node, accountKey, area, currentLocation) {
-  const terms = logicalTerms(node, "&&");
-  if (terms.length !== 4) return false;
-  const paths = terms.find(item => item?.type === "LogicalExpression" && item.operator === "||");
-  if (!paths) return false;
-  const pathTerms = logicalTerms(paths, "||");
-  return terms.some(item => isComparison(item, accountKey, "===", "auth:apikey")) &&
-    terms.some(item => isComparison(item, area, "===", "home")) &&
-    terms.some(item => isComparison(item, currentLocation, "!=", null)) &&
-    pathTerms.length === 2 &&
-    pathTerms.some(item => isPathPrefixCheck(item, currentLocation, "/local/")) &&
-    pathTerms.some(item => isPathPrefixCheck(item, currentLocation, "/remote/"));
-}
-
-function findCurrentHomeGuard(ast) {
-  const candidates = [];
+function findOpenHomeRoute(ast, source) {
+  const routes = [];
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
     const options = fn.params[1];
     if (options?.type !== "ObjectPattern") continue;
-    const accountKey = objectBinding(options, "accountKey");
-    const area = objectBinding(options, "area");
-    const productMode = objectBinding(options, "productMode");
-    if (!accountKey || !area || !productMode) continue;
+    const bindings = Object.fromEntries([
+      "codexLocalAccessStatus", "currentMode", "navigate", "nextMode", "openHome",
+      "restoreNavigation", "startNewConversation", "authMethod",
+    ].map(name => [name, optionBinding(options, name)]));
+    if (["codexLocalAccessStatus", "currentMode", "navigate", "nextMode", "openHome",
+      "restoreNavigation", "startNewConversation"].some(name => !bindings[name])) continue;
 
-    const guards = nodes(fn, node => {
-      if (node.type !== "IfStatement" || !returnsTrue(node.consequent)) return false;
-      const own = nodes(node.test, () => true);
-      const identifiers = new Set(own.filter(item => item.type === "Identifier")
-        .map(item => item.name));
-      return own.some(item => memberName(item) === "sidebarProductMode") &&
-        identifiers.has(area) && identifiers.has(productMode);
+    const branches = nodes(fn, node => {
+      if (node.type !== "IfStatement") return false;
+      const testIdentifiers = nodes(node.test, item => item.type === "Identifier")
+        .map(item => item.name);
+      if (!testIdentifiers.includes(bindings.openHome)) return false;
+      const body = nodes(node.consequent, () => true);
+      return body.some(item => item.type === "ReturnStatement") &&
+        body.some(item => item.type === "CallExpression" &&
+          item.callee?.type === "Identifier" && item.callee.name === bindings.navigate &&
+          literal(item.arguments[0]) === "/" &&
+          item.arguments[1]?.type === "ObjectExpression" &&
+          objectProperty(objectProperty(item.arguments[1], "state")?.value, "sidebarProductMode")?.value?.name === bindings.nextMode);
     }, true);
-    if (guards.length !== 1) continue;
+    if (branches.length !== 1) continue;
 
-    const sidebarModeMembers = nodes(guards[0].test,
-      node => node.type === "MemberExpression" && memberName(node) === "sidebarProductMode");
-    if (sidebarModeMembers.length !== 2) continue;
-    const currentLocations = new Set(sidebarModeMembers.map(memberRoot).filter(Boolean));
-    if (currentLocations.size !== 1) continue;
-    const currentLocation = [...currentLocations][0];
-
-    const modeChecks = nodes(guards[0].test, node => node.type === "LogicalExpression" &&
-      node.operator === "&&" &&
-      (node.left?.type === "Identifier" ||
-        isLegacyCurrentHomeOverride(node.left, accountKey, currentLocation)) &&
-      node.right?.type === "BinaryExpression" && ["!=", "!=="].includes(node.right.operator) &&
-      literal(node.right.right) === null);
-    if (modeChecks.length !== 1) continue;
-    const overrides = nodes(fn, node => node.type === "IfStatement" &&
-      returnsTrue(node.consequent) &&
-      isCurrentHomeOverride(node.test, accountKey, area, currentLocation), true);
-    if (overrides.length > 1) {
-      throw new Error(`API-key 当前首页短路 数量异常（${overrides.length}）`);
-    }
-    candidates.push({
-      accountKey,
-      area,
-      currentLocation,
-      gate: modeChecks[0].left,
-      statement: guards[0],
-      override: overrides[0] ?? null,
+    const libraryRoots = new Set(nodes(fn, node => node.type === "CallExpression" &&
+      memberName(node.callee) === "startsWith" && literal(node.arguments[0]) === "/library/" &&
+      memberName(memberObject(node.callee)) === "pathname")
+      .map(node => memberRoot(memberObject(node.callee))).filter(Boolean));
+    const exactLibraryRoots = new Set(nodes(fn, node => node.type === "BinaryExpression" &&
+      ["===", "=="].includes(node.operator) && literal(node.right) === "/library" &&
+      memberName(node.left) === "pathname")
+      .map(node => memberRoot(node.left)).filter(Boolean));
+    const currentLocations = [...libraryRoots].filter(name => exactLibraryRoots.has(name));
+    if (currentLocations.length !== 1) continue;
+    routes.push({
+      authMethod: bindings.authMethod,
+      branch: branches[0],
+      currentLocation: currentLocations[0],
+      fn,
+      options,
+      name: fn.id?.name,
     });
   }
-  if (candidates.length > 1) {
-    throw new Error(`当前首页短路 数量异常（${candidates.length}）`);
+  const route = unique(routes, "房子按钮 openHome 路由");
+  const callers = [];
+  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
+    const authBindings = nodes(fn, node => node.type === "VariableDeclarator" &&
+      node.id?.type === "ObjectPattern", true)
+      .map(node => objectBinding(node.id, "authMethod")).filter(Boolean);
+    if (authBindings.length !== 1) continue;
+    for (const call of nodes(fn, node => node.type === "CallExpression" &&
+      node.callee?.type === "Identifier" && node.callee.name === route.name)) {
+      const options = call.arguments[1];
+      if (options?.type !== "ObjectExpression" ||
+        !isTrue(objectProperty(options, "openHome")?.value) ||
+        literal(objectProperty(options, "nextMode")?.value) !== "codex") continue;
+      callers.push({
+        authMethod: authBindings[0],
+        call,
+        options,
+        passedAuthMethod: objectProperty(options, "authMethod")?.value,
+      });
+    }
   }
-  return candidates[0] ?? null;
+  const caller = unique(callers, "房子按钮调用点");
+  const markerPresent = source.slice(route.fn.start, route.fn.end).includes(CURRENT_HOME_MARKER);
+  return { ...route, caller, markerPresent };
 }
 
 function isApiKeyOverride(node, authMethod) {
@@ -236,20 +233,6 @@ function isApiKeyOverride(node, authMethod) {
     literal(comparison.right) === "apikey";
 }
 
-function isLegacyCurrentHomeOverride(node, accountKey, currentLocation) {
-  if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
-  const override = node.right;
-  if (override?.type !== "LogicalExpression" || override.operator !== "&&") return false;
-  const account = override.left;
-  const pathname = override.right;
-  return account?.type === "BinaryExpression" && ["===", "=="].includes(account.operator) &&
-    account.left?.type === "Identifier" && account.left.name === accountKey &&
-    literal(account.right) === "auth:apikey" &&
-    pathname?.type === "BinaryExpression" && ["!==", "!="].includes(pathname.operator) &&
-    memberName(pathname.left) === "pathname" && memberRoot(pathname.left) === currentLocation &&
-    literal(pathname.right) === "/";
-}
-
 function patchSource(source) {
   if (!["authMethod", "accountKey", "productMode", "auth:", "chatgpt:"].every(value =>
     source.includes(value))) {
@@ -258,15 +241,18 @@ function patchSource(source) {
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const tracker = findTracker(ast);
-    const currentHome = findCurrentHomeGuard(ast);
-    if (tracker == null || currentHome == null) {
+    const openHome = findOpenHomeRoute(ast, source);
+    if (tracker == null || openHome == null) {
       if (source.includes(MARKER) || source.includes(CURRENT_HOME_MARKER)) {
         throw new Error("补丁标记存在但首页导航结构未知");
       }
       return { status: "not-applicable", source };
     }
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const currentHomePatched = currentHome.override != null;
+    const openHomePatched = openHome.markerPresent &&
+      openHome.authMethod === "__codexAuthMethod" &&
+      openHome.caller.passedAuthMethod?.type === "Identifier" &&
+      openHome.caller.passedAuthMethod.name === openHome.caller.authMethod;
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
@@ -274,15 +260,12 @@ function patchSource(source) {
       tracker.gate.left?.type !== "Identifier" || tracker.gate.right?.type !== "Identifier") {
       throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
-    if (currentHomePatched) {
-      const overrideSource = source.slice(currentHome.override.start, currentHome.override.end);
-      if (!overrideSource.includes(CURRENT_HOME_MARKER)) {
-        throw new Error("API-key 当前首页逻辑存在但缺少本项目标记");
-      }
-    } else if (currentHome.gate.type !== "Identifier") {
-      throw new Error("当前首页导航模式条件结构未知");
+    const openHomePartiallyPatched = openHome.markerPresent || openHome.authMethod != null ||
+      openHome.caller.passedAuthMethod != null;
+    if (!openHomePatched && openHomePartiallyPatched) {
+      throw new Error("房子按钮 API-key 保持逻辑不完整");
     }
-    if (trackerPatched && currentHomePatched) return { status: "already-patched", source };
+    if (trackerPatched && openHomePatched) return { status: "already-patched", source };
 
     const edits = [];
     if (!trackerPatched) {
@@ -293,11 +276,21 @@ function patchSource(source) {
         replacement: `(${originalGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`,
       });
     }
-    if (!currentHomePatched) {
+    if (!openHomePatched) {
       edits.push({
-        start: currentHome.statement.start,
-        end: currentHome.statement.start,
-        replacement: `if(${CURRENT_HOME_MARKER}${currentHome.accountKey}===\`auth:apikey\`&&${currentHome.area}===\`home\`&&${currentHome.currentLocation}!=null&&(${currentHome.currentLocation}.pathname.startsWith(\`/local/\`)||${currentHome.currentLocation}.pathname.startsWith(\`/remote/\`)))return!0;`,
+        start: openHome.options.start + 1,
+        end: openHome.options.start + 1,
+        replacement: "authMethod:__codexAuthMethod,",
+      });
+      edits.push({
+        start: openHome.caller.options.start + 1,
+        end: openHome.caller.options.start + 1,
+        replacement: `authMethod:${openHome.caller.authMethod},`,
+      });
+      edits.push({
+        start: openHome.branch.start,
+        end: openHome.branch.start,
+        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname.startsWith(\`/local/\`)||${openHome.currentLocation}.pathname.startsWith(\`/remote/\`)))return;`,
       });
     }
     let next = source;

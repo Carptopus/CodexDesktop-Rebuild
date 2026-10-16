@@ -107,10 +107,29 @@ function inspectUpdater(asarRoot) {
   return { methods, disabled: windowsMethods.length > 0 && windowsMethods.every((method) => method.disabled) };
 }
 
-function saveCompatibilityEvidence(asarRoot, source) {
-  const destination = path.join(root, "patch-reports", "source-evidence");
+function findFilesNamed(directory, expectedName) {
+  if (!fs.existsSync(directory)) return [];
+  const files = [];
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(fullPath);
+      else if (entry.isFile() && entry.name === expectedName) files.push(fullPath);
+    }
+  }
+  return files.sort();
+}
+
+function saveCompatibilityEvidence(
+  asarRoot,
+  source,
+  destination = path.join(root, "patch-reports", "source-evidence"),
+) {
   const signatures = ["shouldIncludeUpdater", "shouldIncludeWindowsUpdater", "shouldIncludeWindowsMsixUpdater",
-    "FlyoutSubmenuItem", "flyoutHeader", "data-model-picker-model-row", "data-model-picker-view", "modelListConfig"];
+    "FlyoutSubmenuItem", "flyoutHeader", "data-model-picker-model-row", "data-model-picker-view", "modelListConfig",
+    "serviceTierAccess", "Failed to read service tier for request"];
   const files = [];
   for (const [label, directory] of [["main", ".vite/build"], ["webview", "webview/assets"]]) {
     const sourceDirectory = path.join(asarRoot, directory);
@@ -124,12 +143,43 @@ function saveCompatibilityEvidence(asarRoot, source) {
       const copied = label === "main" ? require("./patch-updater").auditUpdaterSource(text).length > 0
         : matches.includes("flyoutHeader") || matches.includes("data-model-picker-model-row")
           || matches.includes("data-model-picker-view") && matches.includes("modelListConfig");
+      const serviceTierEvidence = matches.includes("serviceTierAccess") &&
+        matches.includes("Failed to read service tier for request");
       const readingEvidence = matches.includes("settings.appearance.visualStyle") || name.endsWith(".css") && matches.some(match => match.startsWith("--"));
-      if (copied || readingEvidence || startupEvidence) {
+      if (copied || serviceTierEvidence || readingEvidence || startupEvidence) {
         fs.mkdirSync(path.join(destination, label), { recursive: true });
         fs.copyFileSync(file, path.join(destination, label, name));
       }
-      files.push({ directory, name, matches, copied: copied || readingEvidence || startupEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
+      files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
+    }
+  }
+
+  const platformRoot = path.dirname(asarRoot);
+  const browserSignatures = [
+    "codex_browser_use_agent_request_header",
+    "Browser request-header policy requires caller identity.",
+    "Browser feature gates require caller identity.",
+    "agentRequestHeaderEnabled",
+    "getExtensionRequestHeaders",
+    "readRequirements",
+    "requestHeadersVersion",
+    "request_headers",
+  ];
+  for (const resourceName of ["plugins", "cua_node"]) {
+    const resourceRoot = path.join(platformRoot, resourceName);
+    for (const file of findFilesNamed(resourceRoot, "browser-service.mjs")) {
+      const text = fs.readFileSync(file, "utf8");
+      const relative = path.relative(platformRoot, file);
+      const copiedFile = path.join(destination, "external", relative);
+      fs.mkdirSync(path.dirname(copiedFile), { recursive: true });
+      fs.copyFileSync(file, copiedFile);
+      files.push({
+        directory: path.dirname(relative).replaceAll("\\", "/"),
+        name: path.basename(file),
+        matches: browserSignatures.filter((signature) => text.includes(signature)),
+        copied: true,
+        sha256: crypto.createHash("sha256").update(text).digest("hex"),
+      });
     }
   }
   writeJson(path.join(destination, "index.json"), { schemaVersion: 1, upstream: source, files,
@@ -332,4 +382,4 @@ async function main() {
   else throw new Error("用法：windows-maintenance.js <discover|candidate|verify-release> [--参数 值]");
 }
 if (require.main === module) main().catch((error) => { console.error(`[error] ${error.message}`); process.exitCode = 1; });
-module.exports = { requiredChecks };
+module.exports = { findFilesNamed, requiredChecks, saveCompatibilityEvidence };

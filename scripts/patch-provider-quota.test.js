@@ -18,6 +18,13 @@ function fixture() {
   ].join("");
 }
 
+function legacyFixture() {
+  return fixture().replace(
+    "hardQuota=value(host===`local`&&hardBlockAtom)",
+    "hardQuota=value(hardBlockAtom)&&host===`local`",
+  );
+}
+
 test("按新版 Composer 数据流隔离第三方 Provider 的官方额度门槛", () => {
   const result = patchSource(fixture());
 
@@ -38,6 +45,14 @@ test("多个 Provider 读取仍要求指向同一个会话 Provider atom", () =>
   assert.equal(getProviderMetadata(source).threadProviderAtom, "threadProvider");
   const result = patchSource(source);
   assert.equal(result.status, "patched", result.reason);
+});
+
+test("兼容 26.1007 的独立本地主机额度门槛", () => {
+  const result = patchSource(legacyFixture());
+
+  assert.equal(result.status, "patched", result.reason);
+  assert.match(result.code, /\(!__codexUsesCustomProvider&&hardQuota\)/);
+  assert.equal(patchSource(result.code).status, "already");
 });
 
 test("会话 Provider atom 不唯一时拒绝补丁", () => {
