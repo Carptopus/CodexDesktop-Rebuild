@@ -1,7 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { CURRENT_HOME_MARKER, MARKER, patchSource } = require("./patch-api-key-home-navigation");
+const {
+  CURRENT_HOME_MARKER,
+  HOME_RESELECT_MARKER,
+  MARKER,
+  patchSource,
+} = require("./patch-api-key-home-navigation");
 
 function fixture() {
   return [
@@ -26,6 +31,11 @@ function fixture() {
     "if(!o)return;if(l==null){s();return}r(l.location)}",
     "function Pjo(){let i=store(),h=navigate(),a=start(),{accountId:O,authMethod:k}=mp(),",
     "c=()=>{wti(i,{codexLocalAccessStatus:`allowed`,currentMode:`codex`,navigate:h,nextMode:`codex`,openHome:!0,startNewConversation:a})};return c}",
+    "function Rail({selectedArea:A}){let P=scope(),N=productMode(),C=auth(),",
+    "{accountId:w,authMethod:T,userId:E,isLoading:D}=C,O=`auth:${T}`,",
+    "M=(e,t)=>{let n=N,r=P.get(currentMode),a=destinations[e];run(a,t=>{",
+    "if(A===e&&r===n){let n=destinations[e];if(n==null)return;let r=P.get(currentLocation),i=r!=null&&belongs(r,n);(!i)&&navigate(n.path,{state:t});return}",
+    "restoreHome(P,{accountKey:O,auth:C,area:e,navigate:navigate,productMode:n,state:t})})};return M}",
   ].join("");
 }
 
@@ -126,6 +136,49 @@ test("API-key 从设置页点击房子仍执行官方首页导航", () => {
   assert.deepEqual(navigations, ["/"]);
 });
 
+function clickFeatureHome(source, authMethod) {
+  const navigations = [];
+  const restores = [];
+  const scopeValue = {
+    get(key) {
+      if (key === "currentMode") return "codex";
+      if (key === "currentLocation") return { pathname: "/settings/appearance" };
+      return null;
+    },
+  };
+  const run = Function("authMethod", "scopeValue", "recordNavigation", "recordRestore", [
+    "const scope=()=>scopeValue,productMode=()=>`codex`;",
+    "const auth=()=>({accountId:null,authMethod,userId:null,isLoading:false});",
+    "const currentMode=`currentMode`,currentLocation=`currentLocation`;",
+    "const destinations={home:{path:`/`}},run=(_destination,callback)=>callback({});",
+    "const belongs=()=>false,navigate=path=>recordNavigation(path);",
+    "const restoreHome=(_scope,options)=>recordRestore(options.area);",
+    source,
+    "return Rail({selectedArea:`home`})(`home`,{});",
+  ].join(""));
+  run(authMethod, scopeValue, path => navigations.push(path), area => restores.push(area));
+  return { navigations, restores };
+}
+
+test("API-key 重选功能导航栏首页时恢复记录的最近会话", () => {
+  const result = patchSource(fixture());
+
+  assert.ok(result.source.includes(HOME_RESELECT_MARKER));
+  assert.deepEqual(clickFeatureHome(result.source, "apikey"), {
+    navigations: [],
+    restores: ["home"],
+  });
+});
+
+test("ChatGPT 重选功能导航栏首页时保持官方直达行为", () => {
+  const result = patchSource(fixture());
+
+  assert.deepEqual(clickFeatureHome(result.source, "chatgpt"), {
+    navigations: ["/"],
+    restores: [],
+  });
+});
+
 test("ChatGPT 登录继续遵守官方 capability 与账户条件", () => {
   const result = patchSource(fixture());
 
@@ -157,7 +210,8 @@ test("未认证及其他认证方式不会因补丁越过 capability", () => {
 test("导航跟踪器不唯一时明确失败", () => {
   const source = fixture() + fixture()
     .replaceAll("Lhc", "Mhc").replaceAll("Sti", "Tti")
-    .replaceAll("wti", "xti").replaceAll("Pjo", "Qjo");
+    .replaceAll("wti", "xti").replaceAll("Pjo", "Qjo")
+    .replaceAll("Rail", "Sail");
   const result = patchSource(source);
 
   assert.equal(result.status, "unexpected-shape");

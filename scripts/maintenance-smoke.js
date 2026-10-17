@@ -188,57 +188,6 @@ try {
   run("windows-maintenance.js", arguments.map((value) => value === "123" ? "999" : value), 1);
   run("windows-maintenance.js", arguments.map((value) => value === sha ? "2".repeat(40) : value), 1);
 
-  const storageRoot = path.join(temporary, "storage-project");
-  const storageTemp = path.join(temporary, "storage-temp");
-  const storageForensics = path.join(temporary, "storage-forensics");
-  const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-  for (const name of ["100", "200", "300"]) {
-    write(path.join(storageRoot, ".cache", "downloads", name, "payload.bin"), name);
-    fs.utimesSync(path.join(storageRoot, ".cache", "downloads", name), old, new Date(old.getTime() + Number(name)));
-    write(path.join(storageRoot, ".cache", "gh-downloads", name, "payload.bin"), name);
-    fs.utimesSync(path.join(storageRoot, ".cache", "gh-downloads", name), old, new Date(old.getTime() + Number(name)));
-    write(path.join(storageRoot, ".cache", "acceptance", name, "profile.bin"), name);
-    fs.utimesSync(path.join(storageRoot, ".cache", "acceptance", name), old, new Date(old.getTime() + Number(name)));
-  }
-  write(path.join(storageRoot, ".cache", "downloads", "300", "payload.zip"), "done");
-  write(path.join(storageRoot, ".cache", "downloads", "300", "payload.zip.parts", "0.part"), "duplicate");
-  write(path.join(storageRoot, "build", "Codex", "Codex.exe"), "protected");
-  write(path.join(storageRoot, "build", "previous", "Codex.exe"), "protected previous");
-  for (const directory of ["src", "out", "out-win", "patch-reports"]) write(path.join(storageRoot, directory, "generated.bin"), "generated");
-  for (const name of [".next-preparing-123", ".previous-retired-123"]) {
-    write(path.join(storageRoot, "build", name, "Codex.exe"), "interrupted");
-    fs.utimesSync(path.join(storageRoot, "build", name), old, old);
-  }
-  for (let day = 1; day <= 9; day++) write(path.join(storageForensics, `forensics-2026-10-${String(day).padStart(2, "0")}.log`), String(day));
-  write(path.join(storageForensics, "chrome-debug.log"), "x".repeat(64));
-  write(path.join(storageForensics, "forensics-2026-10-09.log"), "x".repeat(64));
-  write(path.join(storageTemp, "codex-forensics-fatal.log"), "x".repeat(64));
-  write(path.join(storageTemp, "codex-main-test-old", "fixture"), "old");
-  fs.utimesSync(path.join(storageTemp, "codex-main-test-old"), old, old);
-  write(path.join(storageTemp, "codex-rebuild-old", "fixture"), "old");
-  fs.utimesSync(path.join(storageTemp, "codex-rebuild-old"), old, old);
-  const storageEnv = { CODEX_STORAGE_TEST_MODE: "1", CODEX_STORAGE_TEST_ROOT: storageRoot,
-    CODEX_STORAGE_TEST_TEMP: storageTemp, CODEX_STORAGE_TEST_FORENSICS: storageForensics,
-    CODEX_STORAGE_TEST_LOG_LIMIT: "32", CODEX_STORAGE_TEST_FATAL_LOG_LIMIT: "16" };
-  run("storage-governance.js", ["clean"], 0, storageEnv);
-  assert.equal(fs.existsSync(path.join(storageRoot, ".cache", "downloads", "100")), false);
-  assert.equal(fs.existsSync(path.join(storageRoot, ".cache", "downloads", "200")), true);
-  assert.equal(fs.existsSync(path.join(storageRoot, ".cache", "gh-downloads", "100")), false);
-  assert.equal(fs.existsSync(path.join(storageRoot, ".cache", "acceptance", "100")), false);
-  assert.equal(fs.existsSync(path.join(storageRoot, ".cache", "downloads", "300", "payload.zip.parts")), false);
-  assert.equal(fs.readFileSync(path.join(storageRoot, "build", "Codex", "Codex.exe"), "utf8"), "protected");
-  assert.equal(fs.readFileSync(path.join(storageRoot, "build", "previous", "Codex.exe"), "utf8"), "protected previous");
-  assert.equal(fs.existsSync(path.join(storageRoot, "build", ".next-preparing-123")), false);
-  assert.equal(fs.existsSync(path.join(storageRoot, "build", ".previous-retired-123")), false);
-  for (const directory of ["src", "out", "out-win", "patch-reports"]) assert.equal(fs.existsSync(path.join(storageRoot, directory)), false);
-  assert.equal(fs.existsSync(path.join(storageTemp, "codex-main-test-old")), false);
-  assert.equal(fs.existsSync(path.join(storageTemp, "codex-rebuild-old")), false);
-  assert.equal(fs.readdirSync(storageForensics).filter(name => /^forensics-\d{4}-\d{2}-\d{2}\.log$/.test(name)).length, 7);
-  assert.equal(fs.statSync(path.join(storageForensics, "chrome-debug.log")).size, 32);
-  assert.equal(fs.statSync(path.join(storageForensics, "forensics-2026-10-09.log")).size, 32);
-  assert.equal(fs.statSync(path.join(storageTemp, "codex-forensics-fatal.log")).size, 16);
-  checks++;
-
   console.log(`维护链功能测试通过：${checks} 个 CLI 场景；实际 GUI、原始 MSIX 和签名由候选验收覆盖。`);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

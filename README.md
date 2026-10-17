@@ -41,7 +41,8 @@ npm run build:all
 - `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
 - `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
-- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，使首页入口按官方读取逻辑恢复当前会话；ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并让功能导航栏的首页重选分支使用该记录恢复最近会话，而不是直达空首页；ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-thread-timeline.js` 在当前 host 与 App Server 版本支持时启用官方 `thread/timeline/list` 历史路径，移除 API-key / 自定义 Provider 无法获得的远端灰度条件；版本兼容判断仍由官方逻辑负责。
 - `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
 - `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
@@ -53,7 +54,6 @@ npm run build:all
 - `windows-artifacts.js` 与 `windows-maintenance.js` 记录官方来源和候选产物哈希，生成候选、验证发布门槛，并保证正式发布复用已经验收的同一 ZIP。
 - `windows-runtime-checks.js` 检查 Windows EXE / 原生模块架构及未修改组件哈希，实际加载 CUA、运行 code-mode host / rg 基础命令，并执行空白隔离桌面的启动、就绪和退出冒烟。
 - `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径，避免只凭补丁脚本成功退出判断功能可用。
-- `storage-governance.js` 审计本地缓存、构建目录和取证日志；清理模式只处理可重建缓存/构建中间结果、旧隔离验收数据和确认中断的临时目录，下载与验收运行各保留最近两次、取证日志保留最近 7 天并限制单文件大小，正式制品及当前与上一版程序不参与清理。
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
 - 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
 

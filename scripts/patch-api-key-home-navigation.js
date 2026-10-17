@@ -6,8 +6,9 @@
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
  * 同时，侧栏房子按钮使用独立的 openHome 分支直接导航到 `/`，不会进入
  * 上述首页恢复函数。这里只给该按钮传入真实 authMethod，并在 API-key 已经
- * 位于 `/local/<id>` 或 `/remote/<id>` 时短路；根路径和非会话页面仍执行
- * 官方导航。
+ * 位于 `/local/<id>` 或 `/remote/<id>` 时短路。新版功能导航栏还有一条
+ * “当前已经选中首页时再次点击”的直达 `/` 分支；API-key 必须跳过该分支，
+ * 交回官方首页位置记录器，才能从设置等页面恢复最近会话。
  * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
  */
 const fs = require("node:fs");
@@ -17,6 +18,7 @@ const { SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const CURRENT_HOME_MARKER = "/* Codex：API-key 当前首页保持会话。 */";
+const HOME_RESELECT_MARKER = "/* Codex：API-key 首页恢复最近会话。 */";
 const PLATFORMS = ["mac-arm64", "mac-x64", "win", "unix"];
 
 function walk(node, visit, root = node, ownScope = false) {
@@ -225,12 +227,65 @@ function findOpenHomeRoute(ast, source) {
   return { ...route, caller, markerPresent };
 }
 
+function findHomeRailReselect(ast, source) {
+  const candidates = [];
+  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
+    const authBindings = nodes(fn, node => node.type === "VariableDeclarator" &&
+      node.id?.type === "ObjectPattern" && node.init?.type === "Identifier", true)
+      .map(node => ({
+        authMethod: objectBinding(node.id, "authMethod"),
+        authState: node.init.name,
+      }))
+      .filter(item => item.authMethod);
+    if (authBindings.length !== 1) continue;
+
+    for (const arrow of nodes(fn, node => node.type === "ArrowFunctionExpression")) {
+      const restoreCalls = nodes(arrow, node => {
+        if (node.type !== "CallExpression" || node.arguments[1]?.type !== "ObjectExpression") return false;
+        const options = node.arguments[1];
+        return ["accountKey", "area", "navigate", "productMode", "state"].every(name =>
+          objectProperty(options, name)?.value?.type === "Identifier");
+      }, true);
+      if (restoreCalls.length !== 1) continue;
+      const restoreCall = restoreCalls[0];
+      const options = restoreCall.arguments[1];
+      const area = objectProperty(options, "area").value.name;
+      const productMode = objectProperty(options, "productMode").value.name;
+      const branches = nodes(arrow, node => {
+        if (node.type !== "IfStatement" || node.start >= restoreCall.start) return false;
+        const testNames = new Set(nodes(node.test, item => item.type === "Identifier")
+          .map(item => item.name));
+        if (!testNames.has(area) || !testNames.has(productMode)) return false;
+        const body = nodes(node.consequent, () => true);
+        return body.some(item => item.type === "ReturnStatement") &&
+          body.some(item => memberName(item) === "path");
+      }, true);
+      if (branches.length !== 1) continue;
+      candidates.push({
+        authMethod: authBindings[0].authMethod,
+        authState: authBindings[0].authState,
+        branch: branches[0],
+        markerPresent: source.slice(branches[0].start, restoreCall.start)
+          .includes(HOME_RESELECT_MARKER),
+      });
+    }
+  }
+  return unique(candidates, "功能导航栏首页重选分支");
+}
+
 function isApiKeyOverride(node, authMethod) {
   if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
   const comparison = node.right;
   return comparison?.type === "BinaryExpression" && ["===", "=="].includes(comparison.operator) &&
     comparison.left?.type === "Identifier" && comparison.left.name === authMethod &&
     literal(comparison.right) === "apikey";
+}
+
+function isApiKeyRailGuard(node, authState) {
+  return nodes(node, item => item.type === "BinaryExpression" &&
+    ["!==", "!="].includes(item.operator) &&
+    memberName(item.left) === "authMethod" && memberRoot(item.left) === authState &&
+    literal(item.right) === "apikey").length === 1;
 }
 
 function patchSource(source) {
@@ -242,8 +297,10 @@ function patchSource(source) {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const tracker = findTracker(ast);
     const openHome = findOpenHomeRoute(ast, source);
-    if (tracker == null || openHome == null) {
-      if (source.includes(MARKER) || source.includes(CURRENT_HOME_MARKER)) {
+    const homeRail = findHomeRailReselect(ast, source);
+    if (tracker == null || openHome == null || homeRail == null) {
+      if (source.includes(MARKER) || source.includes(CURRENT_HOME_MARKER) ||
+        source.includes(HOME_RESELECT_MARKER)) {
         throw new Error("补丁标记存在但首页导航结构未知");
       }
       return { status: "not-applicable", source };
@@ -253,6 +310,8 @@ function patchSource(source) {
       openHome.authMethod === "__codexAuthMethod" &&
       openHome.caller.passedAuthMethod?.type === "Identifier" &&
       openHome.caller.passedAuthMethod.name === openHome.caller.authMethod;
+    const homeRailPatched = homeRail.markerPresent &&
+      isApiKeyRailGuard(homeRail.branch.test, homeRail.authState);
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
@@ -265,7 +324,12 @@ function patchSource(source) {
     if (!openHomePatched && openHomePartiallyPatched) {
       throw new Error("房子按钮 API-key 保持逻辑不完整");
     }
-    if (trackerPatched && openHomePatched) return { status: "already-patched", source };
+    if (homeRail.markerPresent && !homeRailPatched) {
+      throw new Error("功能导航栏首页恢复逻辑不完整");
+    }
+    if (trackerPatched && openHomePatched && homeRailPatched) {
+      return { status: "already-patched", source };
+    }
 
     const edits = [];
     if (!trackerPatched) {
@@ -291,6 +355,14 @@ function patchSource(source) {
         start: openHome.branch.start,
         end: openHome.branch.start,
         replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname.startsWith(\`/local/\`)||${openHome.currentLocation}.pathname.startsWith(\`/remote/\`)))return;`,
+      });
+    }
+    if (!homeRailPatched) {
+      const originalTest = source.slice(homeRail.branch.test.start, homeRail.branch.test.end);
+      edits.push({
+        start: homeRail.branch.test.start,
+        end: homeRail.branch.test.end,
+        replacement: `(${HOME_RESELECT_MARKER}${homeRail.authState}.authMethod!==\`apikey\`&&(${originalTest}))`,
       });
     }
     let next = source;
@@ -355,4 +427,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { CURRENT_HOME_MARKER, MARKER, patchSource };
+module.exports = { CURRENT_HOME_MARKER, HOME_RESELECT_MARKER, MARKER, patchSource };

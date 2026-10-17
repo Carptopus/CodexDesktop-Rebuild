@@ -84,6 +84,14 @@ function verifyFrontendSource(assets) {
   assert.match(navigationSource, /authMethod:__codexAuthMethod/);
   assert.match(navigationSource,
     /\/\* Codex：API-key 当前首页保持会话。 \*\/__codexAuthMethod===`apikey`&&[A-Za-z_$][\w$]*!=null&&\([A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/local\/`\)\|\|[A-Za-z_$][\w$]*\.pathname\.startsWith\(`\/remote\/`\)\)/);
+  assert.match(navigationSource,
+    /\/\* Codex：API-key 首页恢复最近会话。 \*\/[A-Za-z_$][\w$]*\.authMethod!==`apikey`/);
+  const timelineEntries = files.filter(name => /^app-initial-/.test(name)
+    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildThreadTimeline"));
+  assert.equal(timelineEntries.length, 1);
+  const timelineSource = fs.readFileSync(path.join(assets, timelineEntries[0]), "utf8");
+  assert.match(timelineSource,
+    /supportsThreadTimeline\(\)\{return\s*[A-Za-z_$][\w$]*\(this\.hostId,this\.requestClient\.getAppServerVersion\(\)\)\/\* CodexRebuildThreadTimeline \*\//);
   const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
     && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
   assert.equal(serviceTierEntries.length, 1);
@@ -109,7 +117,7 @@ function verifyFrontendSource(assets) {
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
-  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
+  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
 if (require.main === module) console.log(JSON.stringify(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")), null, 2));
 module.exports = { verifyFrontendSource };
