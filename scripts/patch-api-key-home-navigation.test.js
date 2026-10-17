@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   CURRENT_HOME_MARKER,
   HOME_RESELECT_MARKER,
+  HOME_STATE_MARKER,
   MARKER,
   patchSource,
 } = require("./patch-api-key-home-navigation");
@@ -33,7 +34,7 @@ function fixture() {
     "c=()=>{wti(i,{codexLocalAccessStatus:`allowed`,currentMode:`codex`,navigate:h,nextMode:`codex`,openHome:!0,startNewConversation:a})};return c}",
     "function Rail({selectedArea:A}){let P=scope(),N=productMode(),C=auth(),",
     "{accountId:w,authMethod:T,userId:E,isLoading:D}=C,O=`auth:${T}`,",
-    "M=(e,t)=>{let n=N,r=P.get(currentMode),a=destinations[e];run(a,t=>{",
+    "M=(e,t)=>{let n=N,r=P.get(currentMode),a=destinations[e],o=P.get(currentLocation);run(a,t=>{",
     "if(A===e&&r===n){let n=destinations[e];if(n==null)return;let r=P.get(currentLocation),i=r!=null&&belongs(r,n);(!i)&&navigate(n.path,{state:t});return}",
     "restoreHome(P,{accountKey:O,auth:C,area:e,navigate:navigate,productMode:n,state:t})})};return M}",
   ].join("");
@@ -62,9 +63,10 @@ test("API-key 在 ChatGPT capability 关闭时仍写入与读取端一致的 acc
 
 function clickHome(source, authMethod, {
   currentPath = "/local/thread-1",
+  currentState,
 } = {}) {
   const navigations = [];
-  const current = currentPath == null ? null : { pathname: currentPath };
+  const current = currentPath == null ? null : { pathname: currentPath, state: currentState };
   const store = {
     get(key) {
       if (key === "wc") return false;
@@ -111,6 +113,26 @@ test("API-key 根路径不短路，保留官方空数据落地页导航", () => 
   assert.deepEqual(navigations, ["/"]);
 });
 
+test("API-key 根路径携带会话位置状态时保持当前会话", () => {
+  const result = patchSource(fixture());
+  const navigations = clickHome(result.source, "apikey", {
+    currentPath: "/",
+    currentState: { sidebarThreadLocationId: "chats" },
+  });
+
+  assert.deepEqual(navigations, []);
+});
+
+test("ChatGPT 根路径携带会话位置状态时保持官方首页行为", () => {
+  const result = patchSource(fixture());
+  const navigations = clickHome(result.source, "chatgpt", {
+    currentPath: "/",
+    currentState: { sidebarThreadLocationId: "chats" },
+  });
+
+  assert.deepEqual(navigations, ["/"]);
+});
+
 test("API-key 尚无当前路由时不访问空对象", () => {
   const result = patchSource(fixture());
   const navigations = clickHome(result.source, "apikey", {
@@ -136,13 +158,16 @@ test("API-key 从设置页点击房子仍执行官方首页导航", () => {
   assert.deepEqual(navigations, ["/"]);
 });
 
-function clickFeatureHome(source, authMethod) {
+function clickFeatureHome(source, authMethod, {
+  currentPath = "/settings/appearance",
+  currentState,
+} = {}) {
   const navigations = [];
   const restores = [];
   const scopeValue = {
     get(key) {
       if (key === "currentMode") return "codex";
-      if (key === "currentLocation") return { pathname: "/settings/appearance" };
+      if (key === "currentLocation") return { pathname: currentPath, state: currentState };
       return null;
     },
   };
@@ -170,6 +195,19 @@ test("API-key 重选功能导航栏首页时恢复记录的最近会话", () => 
   });
 });
 
+test("API-key 重选功能导航栏首页时保持根路径中的当前状态会话", () => {
+  const result = patchSource(fixture());
+
+  assert.ok(result.source.includes(HOME_STATE_MARKER));
+  assert.deepEqual(clickFeatureHome(result.source, "apikey", {
+    currentPath: "/",
+    currentState: { sidebarThreadLocationId: "chats" },
+  }), {
+    navigations: [],
+    restores: [],
+  });
+});
+
 test("ChatGPT 重选功能导航栏首页时保持官方直达行为", () => {
   const result = patchSource(fixture());
 
@@ -177,6 +215,29 @@ test("ChatGPT 重选功能导航栏首页时保持官方直达行为", () => {
     navigations: ["/"],
     restores: [],
   });
+});
+
+test("ChatGPT 重选功能导航栏首页时不获得 API-key 状态会话短路", () => {
+  const result = patchSource(fixture());
+
+  assert.deepEqual(clickFeatureHome(result.source, "chatgpt", {
+    currentPath: "/",
+    currentState: { sidebarThreadLocationId: "chats" },
+  }), {
+    navigations: ["/"],
+    restores: [],
+  });
+});
+
+test("旧版缺少状态会话判断的首页补丁会被拒绝", () => {
+  const patched = patchSource(fixture());
+  const incomplete = patched.source
+    .replace("||u.state?.sidebarThreadLocationId!=null", "")
+    .replace(new RegExp(`if\\(\\/\\* Codex：API-key 首页保持状态会话。 \\*\\/[\\s\\S]*?return;`), "");
+  const result = patchSource(incomplete);
+
+  assert.equal(result.status, "unexpected-shape");
+  assert.match(result.reason, /保持逻辑不完整/);
 });
 
 test("ChatGPT 登录继续遵守官方 capability 与账户条件", () => {

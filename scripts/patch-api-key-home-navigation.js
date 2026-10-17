@@ -6,7 +6,7 @@
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
  * 同时，侧栏房子按钮使用独立的 openHome 分支直接导航到 `/`，不会进入
  * 上述首页恢复函数。这里只给该按钮传入真实 authMethod，并在 API-key 已经
- * 位于 `/local/<id>` 或 `/remote/<id>` 时短路。新版功能导航栏还有一条
+ * 位于 `/local/<id>`、`/remote/<id>`，或根路径仍携带会话位置状态时短路。新版功能导航栏还有一条
  * “当前已经选中首页时再次点击”的直达 `/` 分支；API-key 必须跳过该分支，
  * 交回官方首页位置记录器，才能从设置等页面恢复最近会话。
  * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
@@ -19,6 +19,7 @@ const { SRC_DIR, relPath } = require("./patch-util");
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const CURRENT_HOME_MARKER = "/* Codex：API-key 当前首页保持会话。 */";
 const HOME_RESELECT_MARKER = "/* Codex：API-key 首页恢复最近会话。 */";
+const HOME_STATE_MARKER = "/* Codex：API-key 首页保持状态会话。 */";
 const PLATFORMS = ["mac-arm64", "mac-x64", "win", "unix"];
 
 function walk(node, visit, root = node, ownScope = false) {
@@ -223,8 +224,19 @@ function findOpenHomeRoute(ast, source) {
     }
   }
   const caller = unique(callers, "房子按钮调用点");
-  const markerPresent = source.slice(route.fn.start, route.fn.end).includes(CURRENT_HOME_MARKER);
-  return { ...route, caller, markerPresent };
+  const markedGuards = nodes(route.fn, node => node.type === "IfStatement" &&
+    source.slice(node.start, node.consequent.start).includes(CURRENT_HOME_MARKER), true);
+  if (markedGuards.length > 1) {
+    throw new Error(`房子按钮当前会话守卫 数量异常（${markedGuards.length}）`);
+  }
+  const markerPresent = markedGuards.length === 1;
+  const guardSource = markerPresent
+    ? source.slice(markedGuards[0].test.start, markedGuards[0].test.end)
+    : "";
+  const stateGuardPresent = guardSource.includes(
+    `${route.currentLocation}.state?.sidebarThreadLocationId!=null`,
+  );
+  return { ...route, caller, markerPresent, stateGuardPresent };
 }
 
 function findHomeRailReselect(ast, source) {
@@ -261,12 +273,39 @@ function findHomeRailReselect(ast, source) {
           body.some(item => memberName(item) === "path");
       }, true);
       if (branches.length !== 1) continue;
+      const branch = branches[0];
+      const store = restoreCall.arguments[0];
+      if (store?.type !== "Identifier") continue;
+      const currentLocationReads = nodes(branch.consequent, node =>
+        node.type === "VariableDeclarator" && node.id?.type === "Identifier" &&
+        node.init?.type === "CallExpression" && node.init.arguments.length === 1 &&
+        memberName(node.init.callee) === "get" &&
+        memberRoot(node.init.callee) === store.name &&
+        node.init.arguments[0]?.type === "Identifier");
+      if (currentLocationReads.length !== 1) continue;
+      const currentLocationAtom = currentLocationReads[0].init.arguments[0].name;
+      const parentFunctions = nodes(fn, node => /Function/.test(node.type))
+        .filter(node => node !== arrow && node.start < arrow.start && node.end > arrow.end)
+        .sort((left, right) => (left.end - left.start) - (right.end - right.start));
+      const parentFunction = parentFunctions[0];
+      if (parentFunction == null) continue;
+      const visibleLocationReads = nodes(parentFunction, node =>
+        node.type === "VariableDeclarator" && node.id?.type === "Identifier" &&
+        node.init?.type === "CallExpression" && node.init.arguments.length === 1 &&
+        memberName(node.init.callee) === "get" &&
+        memberRoot(node.init.callee) === store.name &&
+        node.init.arguments[0]?.type === "Identifier" &&
+        node.init.arguments[0].name === currentLocationAtom, true);
+      if (visibleLocationReads.length !== 1) continue;
       candidates.push({
         authMethod: authBindings[0].authMethod,
         authState: authBindings[0].authState,
-        branch: branches[0],
-        markerPresent: source.slice(branches[0].start, restoreCall.start)
+        branch,
+        currentLocation: visibleLocationReads[0].id.name,
+        markerPresent: source.slice(branch.start, restoreCall.start)
           .includes(HOME_RESELECT_MARKER),
+        stateMarkerPresent: source.slice(arrow.start, restoreCall.start)
+          .includes(HOME_STATE_MARKER),
       });
     }
   }
@@ -300,17 +339,17 @@ function patchSource(source) {
     const homeRail = findHomeRailReselect(ast, source);
     if (tracker == null || openHome == null || homeRail == null) {
       if (source.includes(MARKER) || source.includes(CURRENT_HOME_MARKER) ||
-        source.includes(HOME_RESELECT_MARKER)) {
+        source.includes(HOME_RESELECT_MARKER) || source.includes(HOME_STATE_MARKER)) {
         throw new Error("补丁标记存在但首页导航结构未知");
       }
       return { status: "not-applicable", source };
     }
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const openHomePatched = openHome.markerPresent &&
+    const openHomePatched = openHome.markerPresent && openHome.stateGuardPresent &&
       openHome.authMethod === "__codexAuthMethod" &&
       openHome.caller.passedAuthMethod?.type === "Identifier" &&
       openHome.caller.passedAuthMethod.name === openHome.caller.authMethod;
-    const homeRailPatched = homeRail.markerPresent &&
+    const homeRailPatched = homeRail.markerPresent && homeRail.stateMarkerPresent &&
       isApiKeyRailGuard(homeRail.branch.test, homeRail.authState);
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
@@ -324,7 +363,7 @@ function patchSource(source) {
     if (!openHomePatched && openHomePartiallyPatched) {
       throw new Error("房子按钮 API-key 保持逻辑不完整");
     }
-    if (homeRail.markerPresent && !homeRailPatched) {
+    if ((homeRail.markerPresent || homeRail.stateMarkerPresent) && !homeRailPatched) {
       throw new Error("功能导航栏首页恢复逻辑不完整");
     }
     if (trackerPatched && openHomePatched && homeRailPatched) {
@@ -354,11 +393,16 @@ function patchSource(source) {
       edits.push({
         start: openHome.branch.start,
         end: openHome.branch.start,
-        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname.startsWith(\`/local/\`)||${openHome.currentLocation}.pathname.startsWith(\`/remote/\`)))return;`,
+        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname.startsWith(\`/local/\`)||${openHome.currentLocation}.pathname.startsWith(\`/remote/\`)||${openHome.currentLocation}.state?.sidebarThreadLocationId!=null))return;`,
       });
     }
     if (!homeRailPatched) {
       const originalTest = source.slice(homeRail.branch.test.start, homeRail.branch.test.end);
+      edits.push({
+        start: homeRail.branch.start,
+        end: homeRail.branch.start,
+        replacement: `if(${HOME_STATE_MARKER}${homeRail.authState}.authMethod===\`apikey\`&&${homeRail.currentLocation}?.state?.sidebarThreadLocationId!=null)return;`,
+      });
       edits.push({
         start: homeRail.branch.test.start,
         end: homeRail.branch.test.end,
@@ -427,4 +471,10 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { CURRENT_HOME_MARKER, HOME_RESELECT_MARKER, MARKER, patchSource };
+module.exports = {
+  CURRENT_HOME_MARKER,
+  HOME_RESELECT_MARKER,
+  HOME_STATE_MARKER,
+  MARKER,
+  patchSource,
+};

@@ -41,7 +41,7 @@ npm run build:all
 - `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
 - `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
-- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并让功能导航栏的首页重选分支使用该记录恢复最近会话，而不是直达空首页；ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并识别新版保存在路由 state 中的会话位置；当前会话点击首页保持不变，从设置等页面点击首页则恢复最近会话，避免直达空首页。ChatGPT、无认证及其他认证方式保持原有条件。
 - `patch-thread-timeline.js` 在当前 host 与 App Server 版本支持时启用官方 `thread/timeline/list` 历史路径，移除 API-key / 自定义 Provider 无法获得的远端灰度条件；版本兼容判断仍由官方逻辑负责。
 - `patch-mcp-status-refresh.js` 将短时间内的 MCP 启动状态通知合并为一次轻量目录刷新；Full 目录只标记为 stale、不在后台立即重拉，详细 MCP 页面后续仍按官方 Full 查询取得资源与模板。
 - `patch-remote-control.js` 只开放 Connections 设置入口；需要 ChatGPT 账户与 workspace routing 的 Remote Control 数据链继续遵守官方 gate，避免 API-key 模式反复建立无凭据的 Durable 连接。
