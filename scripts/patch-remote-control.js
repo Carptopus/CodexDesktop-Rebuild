@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
- * 构建后补丁：开启“连接 / 手机远程控制”入口。
+ * 构建后补丁：开启“连接”入口。
  *
- * 上游当前使用两个 Statsig gate 控制入口：
- *   - 4114442250：显示 Connections 设置项与路由
- *   - 1042620455：启用 Remote Control（Slingshot）数据加载与设置分区
+ * 上游当前使用 4114442250 控制 Connections 设置项与路由。
  *
- * 这里只绕过客户端 rollout gate，不修改服务端返回的 available、
- * accessRequired、authRequired 等能力状态。这样账号没有服务端权限时，
- * 仍会保留真实错误，而不是显示一个必然失败的伪可用状态。
+ * 1042620455 会启动需要 ChatGPT 账户与 workspace routing 的 Remote Control
+ *（Slingshot）数据链。API-key Provider 没有这类账户状态；强制开启会反复
+ * 建立 durable 连接并触发“无法加载组织设置”。因此该 gate 保持上游判断，
+ * 这里只开放 Connections 入口，不伪造 Remote Control 的账户能力。
  */
 const fs = require("fs");
 const path = require("path");
@@ -17,7 +16,6 @@ const { SRC_DIR, relPath } = require("./patch-util");
 
 const GATES = new Map([
   ["4114442250", "remote_connections_visibility"],
-  ["1042620455", "remote_control_slingshot"],
 ]);
 
 function walk(node, visitor) {
@@ -160,4 +158,6 @@ function main() {
   );
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { GATES, findPatches, marker };

@@ -92,6 +92,15 @@ function verifyFrontendSource(assets) {
   const timelineSource = fs.readFileSync(path.join(assets, timelineEntries[0]), "utf8");
   assert.match(timelineSource,
     /supportsThreadTimeline\(\)\{return\s*[A-Za-z_$][\w$]*\(this\.hostId,this\.requestClient\.getAppServerVersion\(\)\)\/\* CodexRebuildThreadTimeline \*\//);
+  const mcpRefreshEntries = files.filter(name => /^app-initial-/.test(name)
+    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildMcpStatusRefresh"));
+  assert.equal(mcpRefreshEntries.length, 1);
+  const mcpRefreshSource = fs.readFileSync(path.join(assets, mcpRefreshEntries[0]), "utf8");
+  assert.match(mcpRefreshSource, /toolsAndAuthOnly/);
+  assert.match(mcpRefreshSource, /mention-discovery/);
+  assert.match(mcpRefreshSource, /refetchType:`none`/);
+  assert.match(mcpRefreshSource, /===`full`/);
+  assert.match(mcpRefreshSource, /CodexRebuildMcpStatusRefresh \*\/\)\},250\)/);
   const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
     && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
   assert.equal(serviceTierEntries.length, 1);
@@ -117,7 +126,7 @@ function verifyFrontendSource(assets) {
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
-  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
+  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
 if (require.main === module) console.log(JSON.stringify(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")), null, 2));
 module.exports = { verifyFrontendSource };

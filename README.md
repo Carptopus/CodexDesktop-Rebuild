@@ -43,6 +43,8 @@ npm run build:all
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
 - `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并让功能导航栏的首页重选分支使用该记录恢复最近会话，而不是直达空首页；ChatGPT、无认证及其他认证方式保持原有条件。
 - `patch-thread-timeline.js` 在当前 host 与 App Server 版本支持时启用官方 `thread/timeline/list` 历史路径，移除 API-key / 自定义 Provider 无法获得的远端灰度条件；版本兼容判断仍由官方逻辑负责。
+- `patch-mcp-status-refresh.js` 将短时间内的 MCP 启动状态通知合并为一次轻量目录刷新；Full 目录只标记为 stale、不在后台立即重拉，详细 MCP 页面后续仍按官方 Full 查询取得资源与模板。
+- `patch-remote-control.js` 只开放 Connections 设置入口；需要 ChatGPT 账户与 workspace routing 的 Remote Control 数据链继续遵守官方 gate，避免 API-key 模式反复建立无凭据的 Durable 连接。
 - `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
 - `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
