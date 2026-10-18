@@ -19,6 +19,7 @@ const { SRC_DIR, relPath } = require("./patch-util");
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const HOME_CURRENT_MARKER = "/* Codex：API-key 首页保持当前位置。 */";
 const HOME_STATE_MARKER = "/* Codex：API-key 首页保持当前。 */";
+const HOME_RESTORE_MARKER = "/* Codex：API-key 首页从其他页面恢复会话。 */";
 const LEGACY_MARKERS = [
   "/* Codex：API-key 当前首页保持会话。 */",
   "/* Codex：API-key 首页恢复最近会话。 */",
@@ -301,12 +302,35 @@ function findHomeRestore(ast, source) {
         current,
         currentHome,
         gate,
+        preparedRestore: findPreparedRestoreCheck(fn, store, capability),
         markerPresent: currentHome.markerPresent,
       });
     }
   }
   if (candidates.length > 1) throw new Error(`公共首页恢复当前位置分支 数量异常（${candidates.length}）`);
   return candidates[0] ?? null;
+}
+
+function findPreparedRestoreCheck(fn, store, capability) {
+  const candidates = [];
+  for (const conditional of nodes(fn,
+    item => item.type === "ConditionalExpression", { ownScope: true })) {
+    const prepared = conditional.consequent;
+    const direct = conditional.alternate;
+    const testPatched = isApiKeyRestoreOverride(conditional.test);
+    if (!testPatched &&
+      (conditional.test?.type !== "Identifier" || conditional.test.name !== capability)) continue;
+    if (
+      prepared?.type !== "CallExpression" ||
+      prepared.arguments[0]?.type !== "Identifier" || prepared.arguments[0].name !== store ||
+      prepared.arguments[1]?.type !== "Identifier" ||
+      direct?.type !== "SequenceExpression") continue;
+    candidates.push({ node: conditional.test });
+  }
+  if (candidates.length !== 1) {
+    throw new Error(`首页完整恢复分支 数量异常（${candidates.length}）`);
+  }
+  return candidates[0];
 }
 
 function isApiKeyOverride(node, authMethod) {
@@ -316,6 +340,20 @@ function isApiKeyOverride(node, authMethod) {
     ["===", "=="].includes(comparisonNode.operator) &&
     comparisonNode.left?.type === "Identifier" && comparisonNode.left.name === authMethod &&
     literal(comparisonNode.right) === "apikey";
+}
+
+function isApiKeyRestoreOverride(node) {
+  if (node?.type !== "LogicalExpression" || node.operator !== "||" ||
+    node.left?.type !== "Identifier") return false;
+  const conditions = logicalOperands(node.right, "&&");
+  return conditions.length === 2 &&
+    conditions.some(item => item.type === "BinaryExpression" &&
+      ["===", "=="].includes(item.operator) &&
+      item.left?.type === "Identifier" &&
+      literal(item.right) === "auth:apikey") &&
+    conditions.some(item => item.type === "BinaryExpression" &&
+      ["===", "=="].includes(item.operator) &&
+      literal(item.right) === "home");
 }
 
 function patchSource(source) {
@@ -349,6 +387,7 @@ function patchSource(source) {
     const gatePatched = isApiKeyHomeGate(homeRestore.gate, homeRestore.capability,
       homeRestore.accountKey, homeRestore.area);
     const currentHomePatched = homeRestore.currentHome.state != null;
+    const preparedRestorePatched = isApiKeyRestoreOverride(homeRestore.preparedRestore.node);
     if (trackerPatched && !source.slice(tracker.gate.start, tracker.gate.end).includes(MARKER)) {
       throw new Error("API-key 放行逻辑存在但缺少本项目标记");
     }
@@ -358,6 +397,10 @@ function patchSource(source) {
     }
     if (currentHomePatched && !homeRestore.currentHome.markerPresent) {
       throw new Error("API-key 首页当前位置逻辑存在但缺少本项目标记");
+    }
+    if (preparedRestorePatched && !source.slice(homeRestore.preparedRestore.node.start,
+      homeRestore.preparedRestore.node.end).includes(HOME_RESTORE_MARKER)) {
+      throw new Error("API-key 首页完整恢复逻辑存在但缺少本项目标记");
     }
     if (!currentHomePatched && homeRestore.currentHome.markerPresent) {
       throw new Error("API-key 首页当前状态逻辑不完整");
@@ -374,7 +417,10 @@ function patchSource(source) {
     if (!currentHomePatched && source.includes(HOME_STATE_MARKER)) {
       throw new Error("API-key 首页当前状态逻辑不完整");
     }
-    if (trackerPatched && gatePatched && currentHomePatched) {
+    if (!preparedRestorePatched && source.includes(HOME_RESTORE_MARKER)) {
+      throw new Error("API-key 首页完整恢复逻辑不完整");
+    }
+    if (trackerPatched && gatePatched && currentHomePatched && preparedRestorePatched) {
       return { status: "already-patched", source };
     }
 
@@ -400,6 +446,14 @@ function patchSource(source) {
         replacement: currentHomePatched ? source.slice(home.node.start, home.node.end) :
           `(${source.slice(home.home.start, home.home.end)}||` +
           `${HOME_STATE_MARKER}${homeRestore.current}.state?.sidebarThreadLocationId!=null)`,
+      },
+      {
+        start: homeRestore.preparedRestore.node.start,
+        end: homeRestore.preparedRestore.node.end,
+        replacement: preparedRestorePatched ? source.slice(homeRestore.preparedRestore.node.start,
+          homeRestore.preparedRestore.node.end) :
+          `(${homeRestore.capability}||${HOME_RESTORE_MARKER}` +
+          `${homeRestore.accountKey}===\`auth:apikey\`&&${homeRestore.area}===\`home\`)`,
       },
     ]);
     return { status: "patched", source: next };
@@ -461,6 +515,7 @@ function main() {
 if (require.main === module) main();
 module.exports = {
   HOME_CURRENT_MARKER,
+  HOME_RESTORE_MARKER,
   HOME_STATE_MARKER,
   LEGACY_MARKERS,
   MARKER,

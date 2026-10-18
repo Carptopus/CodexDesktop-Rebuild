@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   HOME_CURRENT_MARKER,
+  HOME_RESTORE_MARKER,
   HOME_STATE_MARKER,
   LEGACY_MARKERS,
   MARKER,
@@ -74,7 +75,8 @@ function clickHome(source, {
     "const auth=()=>({accountId:null,authMethod:`apikey`});const mode=()=>`current`;",
     "const capability=()=>false,productMode=()=>`codex`,track=()=>{};",
     "const remembered=()=>rememberedValue;const same=()=>({hash:`same`});",
-    "const areaOf=(_store,value)=>value.area;const nativeRestore=()=>true;",
+    "const areaOf=(_store,value)=>value.area;",
+    "const nativeRestore=(_store,record)=>{recordNavigation(record.location.pathname);return true};",
     source,
     "return Rail(activeStore,{accountKey,auth:{},navigate:path=>recordNavigation(path),",
     "productMode:`codex`,state:{}})();",
@@ -102,6 +104,7 @@ test("builtin:home 通过公共恢复函数保持 API-key 当前首页会话", (
   assert.ok(result.source.includes("builtin:home"));
   assert.ok(result.source.includes(HOME_CURRENT_MARKER));
   assert.ok(result.source.includes(HOME_STATE_MARKER));
+  assert.ok(result.source.includes(HOME_RESTORE_MARKER));
   assert.match(result.source,
     /same\(c,r\)\.hash===c\.hash&&\(areaOf\(e,c\)===r\|\|\/\* Codex：API-key 首页保持当前。 \*\/c\.state\?\.sidebarThreadLocationId!=null\)/);
   assert.deepEqual(clickHome(result.source), []);
@@ -188,6 +191,7 @@ test("补丁可重复执行且不重复修改", () => {
   assert.equal(repeated.source.split(MARKER).length - 1, 1);
   assert.equal(repeated.source.split(HOME_CURRENT_MARKER).length - 1, 1);
   assert.equal(repeated.source.split(HOME_STATE_MARKER).length - 1, 1);
+  assert.equal(repeated.source.split(HOME_RESTORE_MARKER).length - 1, 1);
 });
 
 test("只完成写入端的旧补丁会补齐缺少的两段", () => {
