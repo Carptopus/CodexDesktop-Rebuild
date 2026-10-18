@@ -2,9 +2,9 @@
 /**
  * 将 Remote Control 的本地状态同步限制在真实 ChatGPT 认证下。
  *
- * 上游同步组件会在应用启动时无条件读取 local_remote_control_enabled；旧版
- * 本项目曾强开 Remote Control gate，因此可能留下 true。API-key Provider
- * 无法建立该连接，继续同步会反复触发 remoteControl/enable 和认证失败。
+ * 上游本地状态同步组件和 gate bridge 会分别触发 Remote Control 状态更新；
+ * 旧版本项目还曾强开相关 gate，因此可能留下 true。API-key Provider 无法
+ * 建立该连接，任一入口继续发送 enable 都会反复触发认证失败。
  *
  * 本补丁不再强开任何 Remote Control / Connections gate。ChatGPT 认证保持
  * 官方行为；其他认证方式清除遗留启用值，并向当前 app-server 发送一次
@@ -19,6 +19,7 @@ const { relPath, SRC_DIR } = require("./patch-util");
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const STORAGE_KEY = "local_remote_control_enabled";
 const MARKER = "/* CodexRebuildRemoteControlAuthIsolation */";
+const GATE_MARKER = "/* CodexRebuildRemoteControlGateAuthIsolation */";
 
 function propertyName(member) {
   if (member?.type !== "MemberExpression") return null;
@@ -117,43 +118,114 @@ function findRemoteSync(allFunctions, source) {
   };
 }
 
-function findHostAuth(allFunctions, source) {
+function findCurrentAuth(allFunctions, source) {
   const candidates = [];
   for (const fn of allFunctions) {
     const text = source.slice(fn.start, fn.end);
-    if (!["serviceTierAccess", "authMethod", "hostId", "isLoading"]
+    if (!["accountLoading", "authLoading", "authMethod", "authenticatedAccountId",
+      "hasChatGptToken", "requiresAuth", "supportedSurface"]
       .every((value) => text.includes(value))) continue;
-    const declarations = descendants(fn, (node) => node.type === "VariableDeclarator", {
-      skipNestedFunctions: true,
+    const assignments = descendants(fn, (node) =>
+      node.type === "AssignmentExpression" && node.operator === "=" &&
+      node.left?.type === "Identifier" && node.right?.type === "CallExpression");
+    const account = assignments.filter((node) => {
+      if (node.left.name === fn.id.name) return false;
+      const assignmentText = source.slice(node.start, node.end);
+      return ["accountLoading", "authLoading", "authMethod", "authenticatedAccountId",
+        "hasChatGptToken", "requiresAuth", "supportedSurface"]
+        .every((value) => assignmentText.includes(value));
     });
-    for (const host of declarations) {
-      if (host.id?.type !== "Identifier" || host.init?.type !== "CallExpression" ||
-          host.init.callee.type !== "Identifier" || host.init.arguments.length !== 1 ||
-          host.init.arguments[0].type !== "Identifier") continue;
-      const selected = declarations.find((node) =>
-        node.id?.type === "Identifier" && node.init?.type === "LogicalExpression" &&
-        node.init.operator === "??" && node.init.right?.type === "Identifier" &&
-        node.init.right.name === host.id.name);
-      if (selected == null) continue;
-      const auth = declarations.find((node) =>
-        node.id?.type === "Identifier" && node.init?.type === "CallExpression" &&
-        node.init.callee.type === "Identifier" && node.init.arguments.length === 1 &&
-        node.init.arguments[0]?.type === "Identifier" &&
-        node.init.arguments[0].name === selected.id.name &&
-        text.includes(`${node.id.name}?.authMethod`));
-      if (auth == null) continue;
-      candidates.push({
-        fn,
-        hostHook: host.init.callee.name,
-        defaultHost: host.init.arguments[0].name,
-        authHook: auth.init.callee.name,
-      });
+    if (account.length !== 1) continue;
+    const assigned = new Set(assignments.map((node) => node.left.name));
+    const hooks = new Set();
+    for (const hookFn of allFunctions) {
+      const statements = hookFn.body?.body;
+      if (statements?.length !== 1 || statements[0].type !== "ReturnStatement") continue;
+      const call = statements[0].argument;
+      if (call?.type !== "CallExpression" || call.callee?.type !== "Identifier" ||
+          call.arguments.length !== 1 || call.arguments[0]?.type !== "Identifier" ||
+          !assigned.has(call.arguments[0].name)) continue;
+      hooks.add(call.callee.name);
     }
+    if (hooks.size !== 1) continue;
+    candidates.push({
+      initializer: fn,
+      atom: account[0].left.name,
+      hook: [...hooks][0],
+    });
   }
   if (candidates.length !== 1) {
-    throw new Error(`当前 Host 认证 Hook 数量异常（${candidates.length}）`);
+    throw new Error(`当前 App Server 认证状态数量异常（${candidates.length}）`);
   }
   return candidates[0];
+}
+
+function findGateBridge(allFunctions, source) {
+  const candidates = allFunctions.filter((node) => {
+    const text = source.slice(node.start, node.end);
+    return text.includes("set-remote-control-connections-enabled") &&
+      text.includes("remote-connections/gate-bridge") && text.includes("1042620455");
+  });
+  if (candidates.length !== 1) {
+    throw new Error(`Remote Control gate bridge 数量异常（${candidates.length}）`);
+  }
+  const fn = candidates[0];
+  const declarations = descendants(fn, (node) => node.type === "VariableDeclarator", {
+    skipNestedFunctions: true,
+  });
+  const gateState = declarations.filter((node) => {
+    if (node.id?.type !== "ObjectPattern" || node.init?.type !== "CallExpression" ||
+        node.init.callee?.type !== "Identifier") return false;
+    const properties = new Map(node.id.properties.map((property) => [
+      property.key?.name ?? literal(property.key),
+      property.value?.name,
+    ]));
+    return properties.has("checkGate") && properties.has("isLoading");
+  });
+  if (gateState.length !== 1) throw new Error("Remote Control gate 状态 Hook 结构异常");
+  const gateProperties = new Map(gateState[0].id.properties.map((property) => [
+    property.key?.name ?? literal(property.key),
+    property.value?.name,
+  ]));
+  const checkGate = gateProperties.get("checkGate");
+  const gateLoading = gateProperties.get("isLoading");
+  const gateCalls = descendants(fn, (node) =>
+    node.type === "CallExpression" && node.callee?.type === "Identifier" &&
+    node.callee.name === checkGate, {
+      skipNestedFunctions: true,
+    });
+  const remoteGate = gateCalls.filter((node) =>
+    node.arguments.some((argument) => literal(argument) === "1042620455"));
+  const oneToOneGate = gateCalls.filter((node) =>
+    node.arguments.length === 1 && node.arguments[0]?.type === "Identifier");
+  if (remoteGate.length !== 1 || oneToOneGate.length !== 1) {
+    throw new Error("Remote Control gate 调用结构异常");
+  }
+  const catches = descendants(fn, (node) =>
+    node.type === "CallExpression" && propertyName(node.callee) === "catch" &&
+    node.callee.object?.type === "CallExpression" &&
+    node.callee.object.arguments.some((argument) =>
+      literal(argument) === "set-remote-control-connections-enabled"));
+  if (catches.length !== 1 || catches[0].callee.object.callee?.type !== "Identifier" ||
+      catches[0].arguments.length !== 1) {
+    throw new Error("Remote Control gate bridge IPC 结构异常");
+  }
+  const effects = descendants(fn, (node) =>
+    node.type === "CallExpression" && propertyName(memberCallee(node)) === "useEffect");
+  const effectCallee = effects.length === 1 ? memberCallee(effects[0]) : null;
+  if (effectCallee?.object.type !== "Identifier") {
+    throw new Error("Remote Control gate bridge useEffect 结构异常");
+  }
+  return {
+    fn,
+    gateHook: gateState[0].init.callee.name,
+    checkGate,
+    gateLoading,
+    oneToOneGate: oneToOneGate[0].arguments[0].name,
+    ipc: catches[0].callee.object.callee.name,
+    catchHandler: source.slice(catches[0].arguments[0].start, catches[0].arguments[0].end),
+    react: effectCallee.object.name,
+  };
 }
 
 function count(source, value) {
@@ -162,17 +234,20 @@ function count(source, value) {
 
 function validatePatchedSource(source) {
   if (count(source, MARKER) !== 1) throw new Error(`${MARKER} 数量异常`);
+  if (count(source, GATE_MARKER) !== 1) throw new Error(`${GATE_MARKER} 数量异常`);
   if (source.includes("codex-remote-gate:")) throw new Error("仍存在强制开启 Remote Control gate 的旧标记");
-  if (!source.includes("__codexRemoteAuth?.authMethod!==`chatgpt`") ||
+  if (!source.includes("__codexRemoteAccount?.authMethod!==`chatgpt`") ||
       !source.includes("__codexSetRemoteEnabled(!1)") ||
-      !source.includes("__codexRemoteAuth?.isLoading")) {
+      !source.includes("__codexRemoteAccount?.authLoading") ||
+      !source.includes("__codexRemoteGateAccount?.authMethod===`chatgpt`") ||
+      !source.includes("__codexRemoteGateAccount?.authLoading")) {
     throw new Error("Remote Control 认证隔离或遗留状态清理不完整");
   }
   parse(source, { ecmaVersion: "latest", sourceType: "module" });
 }
 
 function patchSource(source) {
-  if (source.includes(MARKER)) {
+  if (source.includes(MARKER) || source.includes(GATE_MARKER)) {
     try {
       validatePatchedSource(source);
       return { status: "already-patched", source };
@@ -196,16 +271,25 @@ function patchSource(source) {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const allFunctions = functions(ast);
     const remote = findRemoteSync(allFunctions, source);
-    const hostAuth = findHostAuth(allFunctions, source);
+    const currentAuth = findCurrentAuth(allFunctions, source);
+    const gate = findGateBridge(allFunctions, source);
     const remoteInitializer = nextInitializer(allFunctions, remote.fn, source);
-    const hostInitializer = nextInitializer(allFunctions, hostAuth.fn, source);
-    const replacement = `function ${remote.fn.id.name}(){let ${remote.container}=${remote.containerExpression},[${remote.storedValue},__codexSetRemoteEnabled]=${remote.storageHook}(\`${STORAGE_KEY}\`),__codexRemoteHostId=${hostAuth.hostHook}(${hostAuth.defaultHost}),__codexRemoteAuth=${hostAuth.authHook}(__codexRemoteHostId);${remote.react}.useEffect(()=>{if(__codexRemoteAuth?.isLoading)return;if(__codexRemoteAuth?.authMethod!==\`chatgpt\`){${remote.storedValue}===!0&&__codexSetRemoteEnabled(!1),${remote.syncFunction}(${remote.container},!1).catch(${remote.catchHandler});return}${remote.storedValue}!=null&&${remote.syncFunction}(${remote.container},${remote.storedValue}).catch(${remote.catchHandler})},[__codexRemoteAuth?.authMethod,__codexRemoteAuth?.isLoading,${remote.storedValue},__codexSetRemoteEnabled,${remote.container}]);return null}${MARKER}`;
+    const gateInitializer = nextInitializer(allFunctions, gate.fn, source);
+    const replacement = `function ${remote.fn.id.name}(){let ${remote.container}=${remote.containerExpression},[${remote.storedValue},__codexSetRemoteEnabled]=${remote.storageHook}(\`${STORAGE_KEY}\`),__codexRemoteAccount=${currentAuth.hook}(${currentAuth.atom});${remote.react}.useEffect(()=>{if(__codexRemoteAccount?.authLoading)return;if(__codexRemoteAccount?.authMethod!==\`chatgpt\`){${remote.storedValue}===!0&&__codexSetRemoteEnabled(!1),${remote.syncFunction}(${remote.container},!1).catch(${remote.catchHandler});return}${remote.storedValue}!=null&&${remote.syncFunction}(${remote.container},${remote.storedValue}).catch(${remote.catchHandler})},[__codexRemoteAccount?.authMethod,__codexRemoteAccount?.authLoading,${remote.storedValue},__codexSetRemoteEnabled,${remote.container}]);return null}${MARKER}`;
+    const gateReplacement = `function ${gate.fn.id.name}(){let{checkGate:${gate.checkGate},isLoading:${gate.gateLoading}}=${gate.gateHook}(),__codexRemoteGateAccount=${currentAuth.hook}(${currentAuth.atom}),i=__codexRemoteGateAccount?.authMethod===\`chatgpt\`&&${gate.checkGate}(${gate.oneToOneGate}),o=__codexRemoteGateAccount?.authMethod===\`chatgpt\`&&(${gate.checkGate}(\`1042620455\`)||i);${gate.react}.useEffect(()=>{if(${gate.gateLoading}||__codexRemoteGateAccount?.authLoading)return;${gate.ipc}(\`set-remote-control-connections-enabled\`,{params:{enabled:o,oneToOnePairingInAppEnabled:i}}).catch(${gate.catchHandler})},[${gate.gateLoading},i,o,__codexRemoteGateAccount?.authLoading,__codexRemoteGateAccount?.authMethod]);return null}${GATE_MARKER}`;
+    const currentAuthInit = `${currentAuth.initializer.id.name}(),`;
     const edits = [
       { start: remote.fn.start, end: remote.fn.end, replacement },
+      { start: gate.fn.start, end: gate.fn.end, replacement: gateReplacement },
       {
         start: remoteInitializer.body.start + 1,
         end: remoteInitializer.body.start + 1,
-        replacement: `${hostInitializer.function.id.name}(),`,
+        replacement: currentAuthInit,
+      },
+      {
+        start: gateInitializer.body.start + 1,
+        end: gateInitializer.body.start + 1,
+        replacement: currentAuthInit,
       },
     ].sort((a, b) => b.start - a.start);
     let next = source;
