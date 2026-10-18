@@ -83,9 +83,9 @@ function verifyFrontendSource(assets) {
   assert.match(navigationSource, /\|\|\/\* Codex：API-key 首页恢复写入。 \*\/[A-Za-z_$][\w$]*===`apikey`/);
   assert.match(navigationSource, /authMethod:__codexAuthMethod/);
   assert.match(navigationSource,
-    /\/\* Codex：API-key 当前首页保持会话。 \*\/__codexAuthMethod===`apikey`&&([A-Za-z_$][\w$]*)!=null&&([A-Za-z_$][\w$]*)\(\1\)===`home`/);
+    /\/\* Codex：API-key 当前首页保持会话。 \*\/__codexAuthMethod===`apikey`&&([A-Za-z_$][\w$]*)!=null&&\(\1\.pathname===`\/`\|\|([A-Za-z_$][\w$]*)\(\1\)===`home`\)/);
   assert.match(navigationSource,
-    /\/\* Codex：API-key 首页保持状态会话。 \*\/[A-Za-z_$][\w$]*\.authMethod===`apikey`&&([A-Za-z_$][\w$]*)!=null&&([A-Za-z_$][\w$]*)\(\1\)===`home`/);
+    /\/\* Codex：API-key 首页保持状态会话。 \*\/[A-Za-z_$][\w$]*\.authMethod===`apikey`&&([A-Za-z_$][\w$]*)!=null&&\(\1\.pathname===`\/`\|\|([A-Za-z_$][\w$]*)\(\1\)===`home`\)/);
   assert.match(navigationSource,
     /\/\* Codex：API-key 首页恢复最近会话。 \*\/[A-Za-z_$][\w$]*\.authMethod!==`apikey`/);
   const timelineEntries = files.filter(name => /^app-initial-/.test(name)
