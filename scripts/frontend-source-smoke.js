@@ -83,6 +83,8 @@ function verifyFrontendSource(assets) {
   assert.match(navigationSource, /\|\|\/\* Codex：API-key 首页恢复写入。 \*\/[A-Za-z_$][\w$]*===`apikey`/);
   assert.match(navigationSource,
     /\([A-Za-z_$][\w$]*\|\|\/\* Codex：API-key 首页保持当前位置。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*===`home`\)&&[A-Za-z_$][\w$]*!=null/);
+  assert.match(navigationSource,
+    /&&\([A-Za-z_$][\w$]*\([^)]*\)===[A-Za-z_$][\w$]*\|\|\/\* Codex：API-key 首页保持当前。 \*\/[A-Za-z_$][\w$]*\.state\?\.sidebarThreadLocationId!=null\)/);
   assert.doesNotMatch(navigationSource, /Codex：API-key 当前首页保持会话/);
   assert.doesNotMatch(navigationSource, /Codex：API-key 首页保持状态会话/);
   assert.doesNotMatch(navigationSource, /Codex：API-key 首页恢复最近会话/);

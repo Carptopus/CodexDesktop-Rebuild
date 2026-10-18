@@ -18,6 +18,7 @@ const { SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const HOME_CURRENT_MARKER = "/* Codex：API-key 首页保持当前位置。 */";
+const HOME_STATE_MARKER = "/* Codex：API-key 首页保持当前。 */";
 const LEGACY_MARKERS = [
   "/* Codex：API-key 当前首页保持会话。 */",
   "/* Codex：API-key 首页恢复最近会话。 */",
@@ -165,6 +166,87 @@ function isApiKeyHomeGate(node, capability, accountKey, area) {
     conditions.some(item => comparison(item, area, "home"));
 }
 
+function currentHomeMatch(node, current, area) {
+  if (node?.type !== "BinaryExpression" || !["===", "=="].includes(node.operator)) return null;
+  const left = node.left;
+  if (left?.type !== "CallExpression" || left.arguments.length !== 2 ||
+      left.callee?.type !== "Identifier" || left.arguments[1]?.type !== "Identifier" ||
+      left.arguments[1].name !== current || node.right?.type !== "Identifier" ||
+      node.right.name !== area) return null;
+  return left.callee.name;
+}
+
+function sidebarThreadMember(node, current) {
+  const member = node?.type === "ChainExpression" ? node.expression : node;
+  return member?.type === "MemberExpression" && member.optional === true &&
+    member.object?.type === "MemberExpression" && member.object.optional !== true &&
+    member.object.object?.type === "Identifier" && member.object.object.name === current &&
+    member.object.property?.type === "Identifier" && member.object.property.name === "state" &&
+    member.property?.type === "Identifier" && member.property.name === "sidebarThreadLocationId"
+    ? member : null;
+}
+
+function isSidebarThreadLocationMember(node, current) {
+  return sidebarThreadMember(node, current) != null;
+}
+
+function sidebarThreadLocationPresence(node, current) {
+  if (node?.type !== "BinaryExpression" || !["!=", "!=="].includes(node.operator)) return null;
+  return isSidebarThreadLocationMember(node.left, current) && literal(node.right) === null ? node : null;
+}
+
+function currentHomeDirect(node, current, area) {
+  const classifier = currentHomeMatch(node, current, area);
+  return classifier == null ? null : { classifier, home: node, state: null };
+}
+
+function findCurrentHomeCheck(fn, current, area, source) {
+  const candidates = [];
+  // 当前首页判断所在分支的文本范围用于核对 marker；结构判定仍只认官方条件本身。
+  const branchRange = nodes(fn,
+    item => item.type === "IfStatement" && item.consequent.type === "ReturnStatement" &&
+      item.test?.type === "LogicalExpression" && item.test.operator === "&&",
+    { ownScope: true })
+    .map(item => item.test)
+    .find(item => nodes(item, node => currentHomeDirect(node, current, area) != null).length >= 1) ?? null;
+  const orExpressions = nodes(fn,
+    item => item.type === "LogicalExpression" && item.operator === "||",
+    { ownScope: true });
+  for (const node of nodes(fn, item => item.type === "BinaryExpression" &&
+    ["===", "=="].includes(item.operator), { ownScope: true })) {
+    const direct = currentHomeDirect(node, current, area);
+    if (direct == null) continue;
+    const alternatives = orExpressions
+      .filter(item => item.start <= node.start && item.end >= node.end)
+      .map(item => ({ item, parts: logicalOperands(item, "||") }))
+      .filter(({ parts }) => parts.length === 2 && parts.includes(node))
+      .map(({ item, parts }) => {
+        const state = parts.find(part => part !== node);
+        return sidebarThreadLocationPresence(state, current) == null
+          ? null : { item, state };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.item.end - left.item.start - (right.item.end - right.item.start));
+    const alternative = alternatives[0] ?? null;
+    // 无状态条件时扫描整个分支，避免残留 marker 被误判为已完成。
+    const patchedRange = alternative?.item ?? node;
+    const markerRange = branchRange == null ? patchedRange : {
+      start: Math.min(patchedRange.start, branchRange.start),
+      end: Math.max(patchedRange.end, branchRange.end),
+    };
+    const markerPresent = source.slice(markerRange.start, markerRange.end).includes(HOME_STATE_MARKER);
+    const statePatched = alternative?.state != null && markerPresent;
+    candidates.push({
+      ...direct,
+      state: statePatched ? alternative.state : null,
+      node: patchedRange,
+      markerPresent,
+    });
+  }
+  if (candidates.length !== 1) throw new Error(`首页当前位置判定 数量异常（${candidates.length}）`);
+  return candidates[0];
+}
+
 function findHomeRestore(ast, source) {
   const candidates = [];
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
@@ -205,14 +287,21 @@ function findHomeRestore(ast, source) {
           node.init?.type === "CallExpression" && memberName(node.init.callee) === "get" &&
           memberRoot(node.init.callee) === store);
       if (capabilityDeclarations.length !== 1) continue;
+      let currentHome;
+      try {
+        currentHome = findCurrentHomeCheck(fn, current, bindings.area, source);
+      } catch {
+        continue;
+      }
 
       candidates.push({
         accountKey: bindings.accountKey,
         area: bindings.area,
         capability,
         current,
+        currentHome,
         gate,
-        markerPresent: source.slice(gate.start, gate.end).includes(HOME_CURRENT_MARKER),
+        markerPresent: currentHome.markerPresent,
       });
     }
   }
@@ -257,40 +346,60 @@ function patchSource(source) {
     }
 
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const homePatched = isApiKeyHomeGate(homeRestore.gate, homeRestore.capability,
+    const gatePatched = isApiKeyHomeGate(homeRestore.gate, homeRestore.capability,
       homeRestore.accountKey, homeRestore.area);
+    const currentHomePatched = homeRestore.currentHome.state != null;
     if (trackerPatched && !source.slice(tracker.gate.start, tracker.gate.end).includes(MARKER)) {
       throw new Error("API-key 放行逻辑存在但缺少本项目标记");
     }
-    if (homePatched && !homeRestore.markerPresent) {
+    if (gatePatched && !source.slice(homeRestore.gate.start, homeRestore.gate.end)
+      .includes(HOME_CURRENT_MARKER)) {
+      throw new Error("API-key 首页放行逻辑存在但缺少本项目标记");
+    }
+    if (currentHomePatched && !homeRestore.currentHome.markerPresent) {
       throw new Error("API-key 首页当前位置逻辑存在但缺少本项目标记");
+    }
+    if (!currentHomePatched && homeRestore.currentHome.markerPresent) {
+      throw new Error("API-key 首页当前状态逻辑不完整");
     }
     if (!trackerPatched && (source.includes(MARKER) ||
       tracker.gate.type !== "LogicalExpression" || tracker.gate.operator !== "&&" ||
       tracker.gate.left?.type !== "Identifier" || tracker.gate.right?.type !== "Identifier")) {
       throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
-    if (!homePatched && (source.includes(HOME_CURRENT_MARKER) ||
+    if (!gatePatched && (source.includes(HOME_CURRENT_MARKER) ||
       homeRestore.gate.type !== "Identifier")) {
       throw new Error("公共首页恢复当前位置逻辑不完整");
     }
-    if (trackerPatched !== homePatched) {
-      throw new Error("API-key 首页补丁只完成了一部分");
+    if (!currentHomePatched && source.includes(HOME_STATE_MARKER)) {
+      throw new Error("API-key 首页当前状态逻辑不完整");
     }
-    if (trackerPatched) return { status: "already-patched", source };
+    if (trackerPatched && gatePatched && currentHomePatched) {
+      return { status: "already-patched", source };
+    }
 
     const originalTrackerGate = source.slice(tracker.gate.start, tracker.gate.end);
+    const home = homeRestore.currentHome;
     const next = applyEdits(source, [
       {
         start: tracker.gate.start,
         end: tracker.gate.end,
-        replacement: `(${originalTrackerGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`,
+        replacement: trackerPatched ? originalTrackerGate :
+          `(${originalTrackerGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`,
       },
       {
         start: homeRestore.gate.start,
         end: homeRestore.gate.end,
-        replacement: `(${homeRestore.capability}||${HOME_CURRENT_MARKER}` +
+        replacement: gatePatched ? source.slice(homeRestore.gate.start, homeRestore.gate.end) :
+          `(${homeRestore.capability}||${HOME_CURRENT_MARKER}` +
           `${homeRestore.accountKey}===\`auth:apikey\`&&${homeRestore.area}===\`home\`)`,
+      },
+      {
+        start: home.node.start,
+        end: home.node.end,
+        replacement: currentHomePatched ? source.slice(home.node.start, home.node.end) :
+          `(${source.slice(home.home.start, home.home.end)}||` +
+          `${HOME_STATE_MARKER}${homeRestore.current}.state?.sidebarThreadLocationId!=null)`,
       },
     ]);
     return { status: "patched", source: next };
@@ -352,6 +461,7 @@ function main() {
 if (require.main === module) main();
 module.exports = {
   HOME_CURRENT_MARKER,
+  HOME_STATE_MARKER,
   LEGACY_MARKERS,
   MARKER,
   patchSource,

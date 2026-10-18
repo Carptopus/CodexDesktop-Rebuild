@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   HOME_CURRENT_MARKER,
+  HOME_STATE_MARKER,
   LEGACY_MARKERS,
   MARKER,
   patchSource,
@@ -43,6 +44,7 @@ function clickHome(source, {
   accountKey = "auth:apikey",
   capability = false,
   currentArea = "home",
+  sidebarThreadLocationId = "chats",
   rememberedArea = "home",
   rememberedDepartedAt = 1,
   rememberedPath = "/thread/remembered",
@@ -50,9 +52,9 @@ function clickHome(source, {
 } = {}) {
   const navigations = [];
   const current = currentArea == null ? null : {
-    area: currentArea,
+    area: currentArea === "home" ? null : currentArea,
     hash: `same`,
-    state: { sidebarProductMode: "codex" },
+    state: { sidebarProductMode: "codex", sidebarThreadLocationId },
   };
   const rememberedValue = hasRemembered ? {
     departedAt: rememberedDepartedAt,
@@ -99,21 +101,43 @@ test("builtin:home 通过公共恢复函数保持 API-key 当前首页会话", (
   assert.equal(result.status, "patched");
   assert.ok(result.source.includes("builtin:home"));
   assert.ok(result.source.includes(HOME_CURRENT_MARKER));
+  assert.ok(result.source.includes(HOME_STATE_MARKER));
   assert.match(result.source,
-    /\(s\|\|\/\* Codex：API-key 首页保持当前位置。 \*\/t===`auth:apikey`&&r===`home`\)&&c!=null/);
+    /same\(c,r\)\.hash===c\.hash&&\(areaOf\(e,c\)===r\|\|\/\* Codex：API-key 首页保持当前。 \*\/c\.state\?\.sidebarThreadLocationId!=null\)/);
   assert.deepEqual(clickHome(result.source), []);
+});
+
+test("API-key 当前会话位于真实空首页分类时仍保持当前位置", () => {
+  const result = patchSource(fixture());
+
+  assert.deepEqual(clickHome(result.source, {
+    currentArea: "home",
+    sidebarThreadLocationId: "chats",
+  }), []);
+  assert.deepEqual(clickHome(result.source, {
+    currentArea: "home",
+    sidebarThreadLocationId: null,
+    rememberedDepartedAt: null,
+  }), ["/"]);
 });
 
 test("API-key 从设置页进入首页时恢复已记录的会话", () => {
   const result = patchSource(fixture());
 
-  assert.deepEqual(clickHome(result.source, { currentArea: "settings" }), ["/thread/remembered"]);
+  assert.deepEqual(clickHome(result.source, {
+    currentArea: "settings",
+    sidebarThreadLocationId: null,
+  }), ["/thread/remembered"]);
 });
 
 test("API-key 没有首页记录时保留官方根路由 fallback", () => {
   const result = patchSource(fixture());
 
-  assert.deepEqual(clickHome(result.source, { currentArea: "settings", hasRemembered: false }), ["/"]);
+  assert.deepEqual(clickHome(result.source, {
+    currentArea: "settings",
+    sidebarThreadLocationId: null,
+    hasRemembered: false,
+  }), ["/"]);
 });
 
 test("ChatGPT capability 可用时保持官方当前首页短路", () => {
@@ -163,24 +187,48 @@ test("补丁可重复执行且不重复修改", () => {
   assert.equal(repeated.source, patched.source);
   assert.equal(repeated.source.split(MARKER).length - 1, 1);
   assert.equal(repeated.source.split(HOME_CURRENT_MARKER).length - 1, 1);
+  assert.equal(repeated.source.split(HOME_STATE_MARKER).length - 1, 1);
 });
 
-test("只有写入端改动的不完整补丁会被拒绝", () => {
+test("只完成写入端的旧补丁会补齐缺少的两段", () => {
   const incomplete = fixture().replace("a&&o&&",
     `(a&&o||${MARKER}i===\`apikey\`)&&`);
   const result = patchSource(incomplete);
 
-  assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /只完成了一部分/);
+  assert.equal(result.status, "patched");
+  assert.ok(result.source.includes(HOME_CURRENT_MARKER));
+  assert.ok(result.source.includes(HOME_STATE_MARKER));
+  assert.match(result.source, /areaOf\(e,c\)===r\|\|\/\* Codex：API-key 首页保持当前。 \*\/c\.state\?\.sidebarThreadLocationId!=null/);
+});
+
+test("只完成公共放行的旧补丁会补齐缺少的两段", () => {
+  const incomplete = fixture().replace("if(s&&c!=null&&",
+    `if((s||${HOME_CURRENT_MARKER}t===\`auth:apikey\`&&r===\`home\`)&&c!=null&&`);
+  const result = patchSource(incomplete);
+
+  assert.equal(result.status, "patched");
+  assert.ok(result.source.includes(MARKER));
+  assert.ok(result.source.includes(HOME_STATE_MARKER));
 });
 
 test("公共恢复条件缺失 home 限定时会被拒绝", () => {
   const patched = patchSource(fixture());
-  const incomplete = patched.source.replace("&&r===`home`", "");
+  const incomplete = patched.source.replace("areaOf(e,c)===r||",
+    "/* Codex：缺少当前位置 */");
   const result = patchSource(incomplete);
 
   assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /当前位置逻辑不完整/);
+  assert.match(result.reason, /当前位置逻辑不完整|补丁标记存在但首页导航结构未知/);
+});
+
+test("公共恢复条件缺少真实会话状态判据时会被拒绝", () => {
+  const patched = patchSource(fixture());
+  const incomplete = patched.source.replace(
+    `||${HOME_STATE_MARKER}c.state?.sidebarThreadLocationId!=null`, HOME_STATE_MARKER);
+  const result = patchSource(incomplete);
+
+  assert.equal(result.status, "unexpected-shape");
+  assert.match(result.reason, /当前状态逻辑不完整/);
 });
 
 test("没有本项目标记的同形逻辑会被拒绝", () => {
