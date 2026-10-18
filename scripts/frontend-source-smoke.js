@@ -103,6 +103,13 @@ function verifyFrontendSource(assets) {
   assert.match(mcpRefreshSource, /refetchType:`none`/);
   assert.match(mcpRefreshSource, /===`full`/);
   assert.match(mcpRefreshSource, /CodexRebuildMcpStatusRefresh \*\/\)\},250\)/);
+  const remoteControlEntries = files.filter(name => /^app-initial-/.test(name)
+    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildRemoteControlAuthIsolation"));
+  assert.equal(remoteControlEntries.length, 1);
+  const remoteControlSource = fs.readFileSync(path.join(assets, remoteControlEntries[0]), "utf8");
+  assert.match(remoteControlSource, /__codexRemoteAuth\?\.authMethod!==`chatgpt`/);
+  assert.match(remoteControlSource, /__codexSetRemoteEnabled\(!1\)/);
+  assert.doesNotMatch(remoteControlSource, /codex-remote-gate:/);
   const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
     && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
   assert.equal(serviceTierEntries.length, 1);
@@ -113,7 +120,8 @@ function verifyFrontendSource(assets) {
   const accentModule = fs.readFileSync(path.join(assets, "codex-rebuild-accent-presets.js"), "utf8");
   assert.match(accentModule, /codex-rebuild:accent-preset:v1/);
   assert.match(accentModule, /export function resolveAccentPreset/);
-  assert.match(accentModule, /preset === "default" \? "blue" : preset/);
+  assert.match(accentModule, /preset == null \|\| preset === "default" \? "blue" : preset/);
+  assert.match(accentModule, /CUSTOM_ACCENT_PRESET = "custom"/);
   assert.doesNotMatch(accentModule, /getComputedStyle|#[0-9a-f]{6}/i);
   const readingModule = fs.readFileSync(path.join(assets, "codex-rebuild-reading-width.js"), "utf8");
   assert.match(readingModule, /MIN_WIDTH_PERCENT = 50/);
@@ -128,7 +136,7 @@ function verifyFrontendSource(assets) {
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
-  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
+  return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, remoteControlAuthIsolated: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
 if (require.main === module) console.log(JSON.stringify(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")), null, 2));
 module.exports = { verifyFrontendSource };

@@ -32,7 +32,7 @@ const PATCH_POLICY = [
   { script: "patch-thread-file-manager-action.js", feature: "会话文件管理器入口" },
   { script: "patch-browser-auth.js", feature: "API-key 浏览器认证" },
   { script: "patch-plugin-auth.js", feature: "插件认证与功能开关" },
-  { script: "patch-remote-control.js", feature: "Connections 入口" },
+  { script: "patch-remote-control.js", feature: "Remote Control 认证隔离" },
   { script: "patch-composer-workspace-root.js", feature: "会话工作目录传递" },
   { script: "patch-updater.js", feature: "禁用上游自动更新" },
   { script: "patch-archive-delete.js", feature: "跨 Provider 归档列表与归档删除" },

@@ -114,7 +114,7 @@ test("主题函数唯一注入本地预设解析器并保持幂等", () => {
   assert.equal(patchThemeSource(result.source).status, "already-patched");
 });
 
-test("本地设置、账户同步和自定义清理使用同一预设状态", async () => {
+test("本地设置、账户同步和显式自定义使用同一预设状态", async () => {
   const runtime = await runtimeModule();
   const storage = fakeStorage();
   globalThis.localStorage = storage;
@@ -156,13 +156,18 @@ test("本地设置、账户同步和自定义清理使用同一预设状态", as
   storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
   runtime.useCustomAccent(value => { customValue = value; }, "#123456");
   assert.equal(customValue, "#123456");
-  assert.equal(storage.values.has(runtime.ACCENT_PRESET_STORAGE_KEY), false);
+  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "custom");
+  assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "custom");
+  assert.equal(runtime.resolveAccentPreset("custom", null), null);
 });
 
 test("预设解析补齐官方默认有效色并拒绝无效本地值", async () => {
   const runtime = await runtimeModule();
-  const storage = fakeStorage({ [runtime.ACCENT_PRESET_STORAGE_KEY]: "blue" });
+  const storage = fakeStorage();
   globalThis.localStorage = storage;
+  assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "default");
+  assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
+  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   assert.equal(runtime.resolveAccentPreset("chatgpt", "green"), "green");
   assert.equal(runtime.resolveAccentPreset("custom", "green"), "blue");
@@ -175,7 +180,7 @@ test("预设解析补齐官方默认有效色并拒绝无效本地值", async ()
   assert.equal(runtime.accentPresetSelection(null, "custom"), "default");
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "not-a-preset");
-  assert.equal(runtime.resolveAccentPreset("custom", null), null);
+  assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
 });
 
 test("完整主题链复用官方预设气泡且账户主题优先", async t => {
@@ -188,9 +193,13 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
   fs.writeFileSync(bundle, result.source, "utf8");
   const theme = await import(`${pathToFileURL(bundle).href}?test=${Date.now()}`);
   const runtime = await runtimeModule();
-  const storage = fakeStorage({ [runtime.ACCENT_PRESET_STORAGE_KEY]: "blue" });
+  const storage = fakeStorage();
   globalThis.localStorage = storage;
 
+  const localImplicitDefault = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
+  assert.equal(localImplicitDefault["--color-background-user-message"], "#blue-bubble");
+
+  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
   const localBlue = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localBlue["--color-background-user-message"], "#blue-bubble");
   assert.notEqual(localBlue["--color-background-user-message"], "neutral-bubble");
@@ -208,4 +217,8 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
   storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "default");
   const localDefault = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localDefault["--color-background-user-message"], "#blue-bubble");
+
+  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "custom");
+  const localCustom = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
+  assert.equal(localCustom["--color-background-user-message"], "neutral-bubble");
 });

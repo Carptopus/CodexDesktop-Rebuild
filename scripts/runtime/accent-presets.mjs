@@ -1,4 +1,5 @@
 export const ACCENT_PRESET_STORAGE_KEY = "codex-rebuild:accent-preset:v1";
+export const CUSTOM_ACCENT_PRESET = "custom";
 export const ACCENT_PRESETS = new Set([
   "default",
   "blue",
@@ -8,6 +9,7 @@ export const ACCENT_PRESETS = new Set([
   "orange",
   "purple",
   "black",
+  CUSTOM_ACCENT_PRESET,
 ]);
 
 function storage() {
@@ -23,12 +25,6 @@ export function readLocalAccentPreset() {
   }
 }
 
-function clearLocalAccentPreset() {
-  try {
-    storage()?.removeItem(ACCENT_PRESET_STORAGE_KEY);
-  } catch {}
-}
-
 function saveLocalAccentPreset(preset) {
   try {
     storage()?.setItem(ACCENT_PRESET_STORAGE_KEY, preset);
@@ -37,15 +33,16 @@ function saveLocalAccentPreset(preset) {
 
 export function accentPresetSelection(accountTheme, accentSource, fallback) {
   if (accountTheme === undefined || accentSource === "chatgpt") return fallback;
-  return readLocalAccentPreset() ?? fallback;
+  return readLocalAccentPreset() ?? "default";
 }
 
 export function resolveAccentPreset(accentSource, accountPreset) {
   if (accentSource === "chatgpt") return accountPreset;
   const preset = readLocalAccentPreset();
+  if (preset === CUSTOM_ACCENT_PRESET) return null;
   // 官方账户的“默认”会先解析成 effectiveTheme；未登录时没有这层账户数据。
   // Windows 官方当前的有效默认色是 blue，本地模式在渲染阶段补齐同一语义。
-  return preset === "default" ? "blue" : preset;
+  return preset == null || preset === "default" ? "blue" : preset;
 }
 
 export function selectAccentPreset(accountTheme, preset, applyLocal, selectAccount) {
@@ -63,6 +60,7 @@ export function selectAccentPreset(accountTheme, preset, applyLocal, selectAccou
 }
 
 export function useCustomAccent(onChange, value) {
-  clearLocalAccentPreset();
+  // 缺少键表示从未设置，本地模式会采用官方默认蓝色；显式 custom 才表示用户选择自定义色。
+  saveLocalAccentPreset(CUSTOM_ACCENT_PRESET);
   return onChange(value);
 }

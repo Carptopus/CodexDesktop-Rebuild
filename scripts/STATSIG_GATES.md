@@ -85,13 +85,13 @@ gate 2307253562 → codex_git_commit
 | `patch-devtools.js` | `allowInspectElement` / `devTools` | 属性值 → `!0` |
 | `patch-copyright.js` | About Dialog / setAboutPanelOptions 或自定义 HTML | 替换版权文本 |
 | `patch-process-polyfill.js` | Windows `process` polyfill | 注入 `process.env`/`process.platform` |
-| `patch-remote-control.js` | gate `4114442250` | 开启 Connections 入口；Remote Control 数据加载 gate 保持上游判断，避免 API-key 模式建立无凭据的 durable 连接 |
+| `patch-remote-control.js` | `local_remote_control_enabled` 同步组件 | 不覆盖任何 gate；ChatGPT 保持官方同步，API-key 等其他认证清除旧启用值并禁用当前 app-server 的 Remote Control |
 
 ### Remote Control 已确认 gate
 
 | ID | 功能 | 影响范围 |
 |---|---|---|
-| `4114442250` | Remote Connections 可见性 | Settings 中的 Connections 项、相关远程标识 |
+| `4114442250` | Remote Connections 可见性 | Settings 中的 Connections 项、相关远程标识；不得强制开启 |
 | `1042620455` | Remote Control / Slingshot | 手机控制分区、远程设备加载、主进程 gate bridge；不得强制开启 |
 
 ## 备注

@@ -209,7 +209,7 @@ function findOpenHomeRoute(ast, source) {
     ? source.slice(markedGuards[0].test.start, markedGuards[0].test.end)
     : "";
   const currentAreaGuardPresent = guardSource.includes(
-    `${caller.homeClassifier}(${route.currentLocation})===\`home\``,
+    `${route.currentLocation}.pathname===\`/\`||${caller.homeClassifier}(${route.currentLocation})===\`home\``,
   );
   return { ...route, caller, currentAreaGuardPresent, markerPresent };
 }
@@ -335,7 +335,7 @@ function patchSource(source) {
       openHome.caller.passedAuthMethod.name === openHome.caller.authMethod;
     const homeRailPatched = homeRail.markerPresent && homeRail.stateMarkerPresent &&
       homeRail.stateGuardSource.includes(
-        `${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\``,
+        `${homeRail.currentLocation}.pathname===\`/\`||${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\``,
       ) && isApiKeyRailGuard(homeRail.branch.test, homeRail.authState);
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
@@ -379,7 +379,7 @@ function patchSource(source) {
       edits.push({
         start: openHome.branch.start,
         end: openHome.branch.start,
-        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&${openHome.caller.homeClassifier}(${openHome.currentLocation})===\`home\`)return;`,
+        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname===\`/\`||${openHome.caller.homeClassifier}(${openHome.currentLocation})===\`home\`))return;`,
       });
     }
     if (!homeRailPatched) {
@@ -387,7 +387,7 @@ function patchSource(source) {
       edits.push({
         start: homeRail.branch.start,
         end: homeRail.branch.start,
-        replacement: `if(${HOME_STATE_MARKER}${homeRail.authState}.authMethod===\`apikey\`&&${homeRail.currentLocation}!=null&&${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\`)return;`,
+        replacement: `if(${HOME_STATE_MARKER}${homeRail.authState}.authMethod===\`apikey\`&&${homeRail.currentLocation}!=null&&(${homeRail.currentLocation}.pathname===\`/\`||${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\`))return;`,
       });
       edits.push({
         start: homeRail.branch.test.start,

@@ -30,7 +30,7 @@ function fixture() {
     "f=u?.pathname===`/library`||u?.pathname.startsWith(`/library/`);",
     "if(u!=null&&!f&&e.set(Pti,n,{location:u,selectedProject:d}),SFe(e,i),a){r(`/`,{state:{sidebarProductMode:i}});return}",
     "if(!o)return;if(l==null){s();return}r(l.location)}",
-    "function homeArea(e){return e?.pathname.startsWith(`/settings/`)?null:`home`}",
+    "function homeArea(e){return e?.pathname===`/`||e?.pathname.startsWith(`/settings/`)?null:`home`}",
     "function Pjo(){let i=store(),h=navigate(),a=start(),{accountId:O,authMethod:k}=mp(),",
     "p=location(),selected=homeArea(p)===`home`&&mode()===`codex`,",
     "c=()=>{wti(i,{codexLocalAccessStatus:`allowed`,currentMode:`codex`,navigate:h,nextMode:`codex`,openHome:!0,startNewConversation:a})};return c}",
@@ -113,6 +113,12 @@ test("API-key 根路径已属于首页区域时不再导航到空路由", () => 
   });
 
   assert.deepEqual(navigations, []);
+});
+
+test("测试夹具保持真实 Bundle 的裸根路由分类行为", () => {
+  assert.match(fixture(), /pathname===`\/`\|\|e\?\.pathname\.startsWith/);
+  const result = patchSource(fixture());
+  assert.match(result.source, /u\.pathname===`\/`\|\|homeArea\(u\)===`home`/);
 });
 
 test("API-key 根路径携带会话位置状态时保持当前会话", () => {
@@ -234,7 +240,7 @@ test("ChatGPT 重选功能导航栏首页时不获得 API-key 状态会话短路
 test("旧版缺少状态会话判断的首页补丁会被拒绝", () => {
   const patched = patchSource(fixture());
   const incomplete = patched.source
-    .replace("&&homeArea(u)===`home`", "")
+    .replace("&&(u.pathname===`/`||homeArea(u)===`home`)", "")
     .replace(new RegExp(`if\\(\\/\\* Codex：API-key 首页保持状态会话。 \\*\\/[\\s\\S]*?return;`), "");
   const result = patchSource(incomplete);
 
