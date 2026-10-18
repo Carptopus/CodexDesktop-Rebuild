@@ -106,8 +106,11 @@ function verifyFrontendSource(assets) {
     && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildRemoteControlAuthIsolation"));
   assert.equal(remoteControlEntries.length, 1);
   const remoteControlSource = fs.readFileSync(path.join(assets, remoteControlEntries[0]), "utf8");
-  assert.match(remoteControlSource, /__codexRemoteAuth\?\.authMethod!==`chatgpt`/);
+  assert.match(remoteControlSource, /__codexRemoteAccount\?\.authMethod!==`chatgpt`/);
   assert.match(remoteControlSource, /__codexSetRemoteEnabled\(!1\)/);
+  assert.match(remoteControlSource, /CodexRebuildRemoteControlGateAuthIsolation/);
+  assert.match(remoteControlSource, /__codexRemoteGateAccount\?\.authMethod===`chatgpt`/);
+  assert.match(remoteControlSource, /__codexRemoteGateAccount\?\.authLoading/);
   assert.doesNotMatch(remoteControlSource, /codex-remote-gate:/);
   const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
     && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
