@@ -121,7 +121,7 @@ function findHostAuth(allFunctions, source) {
   const candidates = [];
   for (const fn of allFunctions) {
     const text = source.slice(fn.start, fn.end);
-    if (!["serviceTierAccess", "authMethod", "hostId", "isLoading", "apikey"]
+    if (!["serviceTierAccess", "authMethod", "hostId", "isLoading"]
       .every((value) => text.includes(value))) continue;
     const declarations = descendants(fn, (node) => node.type === "VariableDeclarator", {
       skipNestedFunctions: true,

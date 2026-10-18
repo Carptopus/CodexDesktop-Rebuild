@@ -8,7 +8,7 @@ function fixture() {
     "function remoteSync(){let e=(0,cache.c)(4),t=get(Container),[n]=shared(`local_remote_control_enabled`),r,i;return e[0]!==n||e[1]!==t?(r=()=>{n!=null&&sync(t,n).catch(e=>{handle(t,e),log.error(`Failed to sync local remote control enablement`,{error:e})})},i=[n,t],e[0]=n,e[1]=t,e[2]=r,e[3]=i):(r=e[2],i=e[3]),react.useEffect(r,i),null}",
     "var cache,react;",
     "function remoteInit(){return(remoteInit=once((()=>{cache=compiled(),base(),react=reactModule(),sharedInit(),syncInit()})))()}",
-    "function serviceTier(e){let t=(0,serviceCache.c)(10),n=useAtom(defaultHost),r=e?.hostId??n,i=useHostAuth(r),a=i?.authMethod===`apikey`?`apikey`:(i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`),o=i?.authMethod??null,s={authMethod:o,hostId:r},c={serviceTierAccess:a,isLoading:!!i?.isLoading};return c}",
+    "function serviceTier(e){let t=(0,serviceCache.c)(10),n=useAtom(defaultHost),r=e?.hostId??n,i=useHostAuth(r),a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`,o=i?.authMethod??null,s={authMethod:o,hostId:r},c={serviceTierAccess:a,isLoading:!!i?.isLoading};return c}",
     "var serviceCache;",
     "function serviceInit(){return(serviceInit=once((()=>{serviceCache=compiled(),atomInit(),hostInit(),authInit()})))()}",
   ].join("");
