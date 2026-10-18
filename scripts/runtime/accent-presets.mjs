@@ -29,12 +29,19 @@ function clearLocalAccentPreset() {
   } catch {}
 }
 
-export function accentPresetSelection(accountTheme, fallback) {
-  return accountTheme === null ? readLocalAccentPreset() ?? fallback : fallback;
+function saveLocalAccentPreset(preset) {
+  try {
+    storage()?.setItem(ACCENT_PRESET_STORAGE_KEY, preset);
+  } catch {}
+}
+
+export function accentPresetSelection(accountTheme, accentSource, fallback) {
+  if (accountTheme === undefined || accentSource === "chatgpt") return fallback;
+  return readLocalAccentPreset() ?? fallback;
 }
 
 export function resolveAccentPreset(accentSource, accountPreset) {
-  if (accountPreset != null) return accentSource === "chatgpt" ? accountPreset : null;
+  if (accentSource === "chatgpt") return accountPreset;
   const preset = readLocalAccentPreset();
   // 官方账户的“默认”会先解析成 effectiveTheme；未登录时没有这层账户数据。
   // Windows 官方当前的有效默认色是 blue，本地模式在渲染阶段补齐同一语义。
@@ -43,12 +50,14 @@ export function resolveAccentPreset(accentSource, accountPreset) {
 
 export function selectAccentPreset(accountTheme, preset, applyLocal, selectAccount) {
   return Promise.resolve().then(() => {
+    // 上游可能新增预设；本模块不认识时不保存本地值，也不吞掉官方选择动作。
+    if (!ACCENT_PRESETS.has(preset)) return selectAccount();
+    // 无论当前是否能同步到 ChatGPT 账户，都保留一份本地预设。
+    // 自定义 Provider 重启后可能拿不到账户主题；此时仍应恢复用户上次选择的官方预设。
+    saveLocalAccentPreset(preset);
     if (accountTheme !== null) {
-      clearLocalAccentPreset();
       return selectAccount();
     }
-    if (!ACCENT_PRESETS.has(preset)) return;
-    storage()?.setItem(ACCENT_PRESET_STORAGE_KEY, preset);
     return applyLocal();
   });
 }

@@ -9,8 +9,10 @@ const { writeJson, sha256, validateSource, verifySourceFile, confinedFile } = re
 const root = path.resolve(__dirname, "..");
 const requiredChecks = [
   "isolation", "start-exit", "authentication", "thread-history", "provider-switch",
-  "model-catalog", "compaction", "archive-delete", "browser-auth", "plugins-skills",
-  "worker-config", "updater-disabled", "program-rollback", "data-restore", "reading-layout",
+  "model-catalog", "home-navigation", "provider-quota", "service-tier", "thread-timeline",
+  "mcp-refresh", "pet-menu", "remote-control", "compaction", "archive-delete", "browser-auth",
+  "plugins-skills", "worker-config", "updater-disabled", "program-rollback", "data-restore",
+  "reading-layout",
 ];
 
 function readJson(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
@@ -37,12 +39,15 @@ function output(name, value) {
 }
 
 async function discover(options) {
-  const { getWindowsVersion } = require("./sync-upstream");
+  const { getWindowsVersion, resolveSyncDirectory } = require("./sync-upstream");
   const info = await getWindowsVersion(options.version);
   if (!Number.isSafeInteger(info.size) || info.size <= 0 || !info.storeDigest) {
     throw new Error("Store 没有提供可验证的包大小或摘要");
   }
-  writeJson(path.resolve(options.out || ".cache/windows-discovery.json"), {
+  const discoveryFile = options.out
+    ? path.resolve(options.out)
+    : path.join(resolveSyncDirectory(), "windows-discovery.json");
+  writeJson(discoveryFile, {
     schemaVersion: 1, ...info, checkedAt: new Date().toISOString(),
   });
   let approvedVersion = "";

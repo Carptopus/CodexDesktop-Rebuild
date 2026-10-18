@@ -6,46 +6,13 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
+const { applyEdits, key, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
 const MODULE = "codex-rebuild-accent-presets.js";
 const SETTINGS_MARKER = "/* codex-rebuild-local-accent-presets:settings */";
 const THEME_MARKER = "/* codex-rebuild-local-accent-presets:theme */";
 const PLATFORMS = ["mac-arm64", "mac-x64", "win", "unix"];
-
-function walk(node, visit, parent = null) {
-  if (!node || typeof node !== "object" || !node.type) return;
-  visit(node, parent);
-  for (const [key, value] of Object.entries(node)) {
-    if (["type", "start", "end"].includes(key)) continue;
-    if (Array.isArray(value)) {
-      for (const child of value) if (child?.type) walk(child, visit, node);
-    } else if (value?.type) walk(value, visit, node);
-  }
-}
-
-function nodes(root, predicate) {
-  const found = [];
-  walk(root, (node, parent) => { if (predicate(node, parent)) found.push(node); });
-  return found;
-}
-
-function literal(node) {
-  if (node?.type === "Literal") return node.value;
-  if (node?.type === "TemplateLiteral" && node.expressions.length === 0) return node.quasis[0].value.cooked;
-  return null;
-}
-
-function key(node) {
-  if (!node) return null;
-  if (node.type === "Identifier") return node.name;
-  return literal(node);
-}
-
-function unique(items, label) {
-  if (items.length !== 1) throw new Error(`${label} 数量异常（${items.length}）`);
-  return items[0];
-}
 
 function objectBindings(pattern) {
   return Object.fromEntries(pattern.properties.filter(property => property.type === "Property" && property.value?.type === "Identifier")
@@ -55,15 +22,6 @@ function objectBindings(pattern) {
 function importInsertion(ast) {
   const imports = ast.body.filter(node => node.type === "ImportDeclaration");
   return imports.length ? imports.at(-1).end : 0;
-}
-
-function applyEdits(source, edits) {
-  let next = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    next = next.slice(0, edit.start) + edit.text + next.slice(edit.end);
-  }
-  parse(next, { ecmaVersion: "latest", sourceType: "module" });
-  return next;
 }
 
 function patchSettingsSource(source) {
@@ -118,7 +76,7 @@ function patchSettingsSource(source) {
     const edits = [
       { start: importAt, end: importAt, text: moduleImport },
       { start: selection.init.start, end: selection.init.end,
-        text: `__codexAccentSelection(${accountTheme},${originalSelection})` },
+        text: `__codexAccentSelection(${accountTheme},${theme}.accentSource,${originalSelection})` },
       // undefined 表示账户主题仍在加载；null 才表示没有可用账户主题。
       { start: disabled.value.start, end: disabled.value.end, text: `${accountTheme}===void 0` },
       { start: accountCall.start, end: accountCall.end,

@@ -5,8 +5,8 @@
  * 上游的读取端会使用 auth:apikey 查找最近位置，但写入端同时受
  * 新导航模式和 ChatGPT capability 限制，导致 API-key 下从不写入。
  * 同时，侧栏房子按钮使用独立的 openHome 分支直接导航到 `/`，不会进入
- * 上述首页恢复函数。这里只给该按钮传入真实 authMethod，并在 API-key 已经
- * 位于 `/local/<id>`、`/remote/<id>`，或根路径仍携带会话位置状态时短路。新版功能导航栏还有一条
+ * 上述首页恢复函数。这里只给该按钮传入真实 authMethod，并复用官方的
+ * 首页区域分类器判断当前是否已经位于会话/首页区域。新版功能导航栏还有一条
  * “当前已经选中首页时再次点击”的直达 `/` 分支；API-key 必须跳过该分支，
  * 交回官方首页位置记录器，才能从设置等页面恢复最近会话。
  * 补丁不开启 ChatGPT 账户能力，也不改变其他认证方式。
@@ -14,6 +14,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
+const { applyEdits, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
 const MARKER = "/* Codex：API-key 首页恢复写入。 */";
@@ -21,33 +22,6 @@ const CURRENT_HOME_MARKER = "/* Codex：API-key 当前首页保持会话。 */";
 const HOME_RESELECT_MARKER = "/* Codex：API-key 首页恢复最近会话。 */";
 const HOME_STATE_MARKER = "/* Codex：API-key 首页保持状态会话。 */";
 const PLATFORMS = ["mac-arm64", "mac-x64", "win", "unix"];
-
-function walk(node, visit, root = node, ownScope = false) {
-  if (!node || typeof node !== "object" || !node.type) return;
-  if (ownScope && node !== root && /Function/.test(node.type)) return;
-  visit(node);
-  for (const value of Object.values(node)) {
-    if (Array.isArray(value)) {
-      for (const child of value) walk(child, visit, root, ownScope);
-    } else if (value?.type) {
-      walk(value, visit, root, ownScope);
-    }
-  }
-}
-
-function nodes(root, predicate, ownScope = false) {
-  const found = [];
-  walk(root, node => { if (predicate(node)) found.push(node); }, root, ownScope);
-  return found;
-}
-
-function literal(node) {
-  if (node?.type === "Literal") return node.value;
-  if (node?.type === "TemplateLiteral" && node.expressions.length === 0) {
-    return node.quasis[0].value.cooked;
-  }
-  return null;
-}
 
 function propertyName(property) {
   if (property?.type !== "Property") return null;
@@ -73,15 +47,10 @@ function optionBinding(pattern, name) {
     ? property.value.left.name : null;
 }
 
-function unique(items, label) {
-  if (items.length !== 1) throw new Error(`${label} 数量异常（${items.length}）`);
-  return items[0];
-}
-
 function findTracker(ast) {
   const candidates = [];
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
-    const own = nodes(fn, () => true, true);
+    const own = nodes(fn, () => true, { ownScope: true });
     const all = nodes(fn, () => true);
     const auth = own.filter(node => node.type === "VariableDeclarator" &&
       node.id?.type === "ObjectPattern" && node.init?.type === "CallExpression")
@@ -180,7 +149,7 @@ function findOpenHomeRoute(ast, source) {
           literal(item.arguments[0]) === "/" &&
           item.arguments[1]?.type === "ObjectExpression" &&
           objectProperty(objectProperty(item.arguments[1], "state")?.value, "sidebarProductMode")?.value?.name === bindings.nextMode);
-    }, true);
+    }, { ownScope: true });
     if (branches.length !== 1) continue;
 
     const libraryRoots = new Set(nodes(fn, node => node.type === "CallExpression" &&
@@ -215,9 +184,15 @@ function findOpenHomeRoute(ast, source) {
       if (options?.type !== "ObjectExpression" ||
         !isTrue(objectProperty(options, "openHome")?.value) ||
         literal(objectProperty(options, "nextMode")?.value) !== "codex") continue;
+      const homeClassifiers = nodes(fn, node => node.type === "BinaryExpression" &&
+        ["===", "=="].includes(node.operator) && literal(node.right) === "home" &&
+        node.left?.type === "CallExpression" && node.left.callee?.type === "Identifier" &&
+        node.left.arguments.length === 1, { ownScope: true });
+      if (homeClassifiers.length !== 1) continue;
       callers.push({
         authMethod: authBindings[0],
         call,
+        homeClassifier: homeClassifiers[0].left.callee.name,
         options,
         passedAuthMethod: objectProperty(options, "authMethod")?.value,
       });
@@ -225,7 +200,7 @@ function findOpenHomeRoute(ast, source) {
   }
   const caller = unique(callers, "房子按钮调用点");
   const markedGuards = nodes(route.fn, node => node.type === "IfStatement" &&
-    source.slice(node.start, node.consequent.start).includes(CURRENT_HOME_MARKER), true);
+    source.slice(node.start, node.consequent.start).includes(CURRENT_HOME_MARKER), { ownScope: true });
   if (markedGuards.length > 1) {
     throw new Error(`房子按钮当前会话守卫 数量异常（${markedGuards.length}）`);
   }
@@ -233,10 +208,10 @@ function findOpenHomeRoute(ast, source) {
   const guardSource = markerPresent
     ? source.slice(markedGuards[0].test.start, markedGuards[0].test.end)
     : "";
-  const stateGuardPresent = guardSource.includes(
-    `${route.currentLocation}.state?.sidebarThreadLocationId!=null`,
+  const currentAreaGuardPresent = guardSource.includes(
+    `${caller.homeClassifier}(${route.currentLocation})===\`home\``,
   );
-  return { ...route, caller, markerPresent, stateGuardPresent };
+  return { ...route, caller, currentAreaGuardPresent, markerPresent };
 }
 
 function findHomeRailReselect(ast, source) {
@@ -257,7 +232,7 @@ function findHomeRailReselect(ast, source) {
         const options = node.arguments[1];
         return ["accountKey", "area", "navigate", "productMode", "state"].every(name =>
           objectProperty(options, name)?.value?.type === "Identifier");
-      }, true);
+      }, { ownScope: true });
       if (restoreCalls.length !== 1) continue;
       const restoreCall = restoreCalls[0];
       const options = restoreCall.arguments[1];
@@ -271,7 +246,7 @@ function findHomeRailReselect(ast, source) {
         const body = nodes(node.consequent, () => true);
         return body.some(item => item.type === "ReturnStatement") &&
           body.some(item => memberName(item) === "path");
-      }, true);
+      }, { ownScope: true });
       if (branches.length !== 1) continue;
       const branch = branches[0];
       const store = restoreCall.arguments[0];
@@ -295,8 +270,15 @@ function findHomeRailReselect(ast, source) {
         memberName(node.init.callee) === "get" &&
         memberRoot(node.init.callee) === store.name &&
         node.init.arguments[0]?.type === "Identifier" &&
-        node.init.arguments[0].name === currentLocationAtom, true);
+        node.init.arguments[0].name === currentLocationAtom, { ownScope: true });
       if (visibleLocationReads.length !== 1) continue;
+      const markedStateGuards = nodes(arrow, node => node.type === "IfStatement" &&
+        node.start < restoreCall.start &&
+        source.slice(node.start, node.consequent.start).includes(HOME_STATE_MARKER),
+      { ownScope: true });
+      if (markedStateGuards.length > 1) {
+        throw new Error(`功能导航栏当前首页守卫 数量异常（${markedStateGuards.length}）`);
+      }
       candidates.push({
         authMethod: authBindings[0].authMethod,
         authState: authBindings[0].authState,
@@ -304,8 +286,10 @@ function findHomeRailReselect(ast, source) {
         currentLocation: visibleLocationReads[0].id.name,
         markerPresent: source.slice(branch.start, restoreCall.start)
           .includes(HOME_RESELECT_MARKER),
-        stateMarkerPresent: source.slice(arrow.start, restoreCall.start)
-          .includes(HOME_STATE_MARKER),
+        stateGuardSource: markedStateGuards.length === 1
+          ? source.slice(markedStateGuards[0].test.start, markedStateGuards[0].test.end)
+          : "",
+        stateMarkerPresent: markedStateGuards.length === 1,
       });
     }
   }
@@ -345,12 +329,14 @@ function patchSource(source) {
       return { status: "not-applicable", source };
     }
     const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
-    const openHomePatched = openHome.markerPresent && openHome.stateGuardPresent &&
+    const openHomePatched = openHome.markerPresent && openHome.currentAreaGuardPresent &&
       openHome.authMethod === "__codexAuthMethod" &&
       openHome.caller.passedAuthMethod?.type === "Identifier" &&
       openHome.caller.passedAuthMethod.name === openHome.caller.authMethod;
     const homeRailPatched = homeRail.markerPresent && homeRail.stateMarkerPresent &&
-      isApiKeyRailGuard(homeRail.branch.test, homeRail.authState);
+      homeRail.stateGuardSource.includes(
+        `${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\``,
+      ) && isApiKeyRailGuard(homeRail.branch.test, homeRail.authState);
     if (trackerPatched) {
       const gateSource = source.slice(tracker.gate.start, tracker.gate.end);
       if (!gateSource.includes(MARKER)) throw new Error("API-key 放行逻辑存在但缺少本项目标记");
@@ -393,7 +379,7 @@ function patchSource(source) {
       edits.push({
         start: openHome.branch.start,
         end: openHome.branch.start,
-        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&(${openHome.currentLocation}.pathname.startsWith(\`/local/\`)||${openHome.currentLocation}.pathname.startsWith(\`/remote/\`)||${openHome.currentLocation}.state?.sidebarThreadLocationId!=null))return;`,
+        replacement: `if(${CURRENT_HOME_MARKER}__codexAuthMethod===\`apikey\`&&${openHome.currentLocation}!=null&&${openHome.caller.homeClassifier}(${openHome.currentLocation})===\`home\`)return;`,
       });
     }
     if (!homeRailPatched) {
@@ -401,7 +387,7 @@ function patchSource(source) {
       edits.push({
         start: homeRail.branch.start,
         end: homeRail.branch.start,
-        replacement: `if(${HOME_STATE_MARKER}${homeRail.authState}.authMethod===\`apikey\`&&${homeRail.currentLocation}?.state?.sidebarThreadLocationId!=null)return;`,
+        replacement: `if(${HOME_STATE_MARKER}${homeRail.authState}.authMethod===\`apikey\`&&${homeRail.currentLocation}!=null&&${openHome.caller.homeClassifier}(${homeRail.currentLocation})===\`home\`)return;`,
       });
       edits.push({
         start: homeRail.branch.test.start,
@@ -409,11 +395,7 @@ function patchSource(source) {
         replacement: `(${HOME_RESELECT_MARKER}${homeRail.authState}.authMethod!==\`apikey\`&&(${originalTest}))`,
       });
     }
-    let next = source;
-    for (const edit of edits.sort((left, right) => right.start - left.start)) {
-      next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end);
-    }
-    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+    const next = applyEdits(source, edits);
     return { status: "patched", source: next };
   } catch (error) {
     return { status: "unexpected-shape", source, reason: error.message };

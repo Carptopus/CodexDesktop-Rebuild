@@ -123,7 +123,7 @@ test("CLI 缺少同步资源时返回失败并生成可读报告", (t) => {
   assert.match(report.errors[0], /mac-arm64/);
 });
 
-test("报告合并正常扫描提示，并把缺少目标与平台不适用分开", (t) => {
+test("报告合并正常扫描提示，并阻止缺少必要补丁目标", (t) => {
   const root = fixture(t);
   const asar = path.join(root, "mac-arm64", "_asar");
   const assets = path.join(asar, "webview", "assets");
@@ -140,19 +140,19 @@ test("报告合并正常扫描提示，并把缺少目标与平台不适用分�
     log: () => {},
   });
 
-  assert.equal(report.canBuild, true);
-  assert.equal(report.reviewCount, 1);
+  assert.equal(report.canBuild, false);
+  assert.equal(report.reviewCount, 0);
   const scanner = report.results.find((item) => item.script === "patch-plugin-auth.js");
   assert.equal(scanner.noticeSummary.length, 1);
   assert.equal(scanner.noticeSummary[0].kind, "info");
   assert.equal(scanner.noticeSummary[0].count, 2);
   assert.equal(report.results.find((item) => item.script === "patch-windows-portable-runtime.js").noticeSummary[0].kind, "info");
-  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").noticeSummary[0].kind, "review");
+  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").status, "failed");
 
   const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  // The table must not claim a missing submenu patch was applied.
+  // A required patch with no verifiable target must block the build.
   const submenuRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-model-picker-submenu.js"));
-  assert.match(submenuRow, /待核对/);
+  assert.match(submenuRow, /失败，阻止构建/);
   const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-plugin-auth.js"));
   assert.equal(infoLines.length, 1);
   assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);

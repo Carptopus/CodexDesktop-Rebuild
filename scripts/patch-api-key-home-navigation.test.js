@@ -30,7 +30,9 @@ function fixture() {
     "f=u?.pathname===`/library`||u?.pathname.startsWith(`/library/`);",
     "if(u!=null&&!f&&e.set(Pti,n,{location:u,selectedProject:d}),SFe(e,i),a){r(`/`,{state:{sidebarProductMode:i}});return}",
     "if(!o)return;if(l==null){s();return}r(l.location)}",
+    "function homeArea(e){return e?.pathname.startsWith(`/settings/`)?null:`home`}",
     "function Pjo(){let i=store(),h=navigate(),a=start(),{accountId:O,authMethod:k}=mp(),",
+    "p=location(),selected=homeArea(p)===`home`&&mode()===`codex`,",
     "c=()=>{wti(i,{codexLocalAccessStatus:`allowed`,currentMode:`codex`,navigate:h,nextMode:`codex`,openHome:!0,startNewConversation:a})};return c}",
     "function Rail({selectedArea:A}){let P=scope(),N=productMode(),C=auth(),",
     "{accountId:w,authMethod:T,userId:E,isLoading:D}=C,O=`auth:${T}`,",
@@ -77,7 +79,7 @@ function clickHome(source, authMethod, {
   };
   const run = Function("activeStore", "recordNavigation", "authMethod", [
     "const wc=`wc`,Ug=`Ug`,Pti=`Pti`,ye=`ye`;",
-    "const store=()=>activeStore,navigate=()=>path=>recordNavigation(path),start=()=>()=>{};",
+    "const store=()=>activeStore,location=()=>activeStore.get(Ug),mode=()=>`codex`,navigate=()=>path=>recordNavigation(path),start=()=>()=>{};",
     "const mp=()=>({accountId:null,authMethod});const dei=()=>{},SFe=()=>{};",
     source,
     "return Pjo()();",
@@ -104,13 +106,13 @@ test("API-key 远程会话点击首页保持当前会话", () => {
   assert.deepEqual(navigations, []);
 });
 
-test("API-key 根路径不短路，保留官方空数据落地页导航", () => {
+test("API-key 根路径已属于首页区域时不再导航到空路由", () => {
   const result = patchSource(fixture());
   const navigations = clickHome(result.source, "apikey", {
     currentPath: "/",
   });
 
-  assert.deepEqual(navigations, ["/"]);
+  assert.deepEqual(navigations, []);
 });
 
 test("API-key 根路径携带会话位置状态时保持当前会话", () => {
@@ -232,7 +234,7 @@ test("ChatGPT 重选功能导航栏首页时不获得 API-key 状态会话短路
 test("旧版缺少状态会话判断的首页补丁会被拒绝", () => {
   const patched = patchSource(fixture());
   const incomplete = patched.source
-    .replace("||u.state?.sidebarThreadLocationId!=null", "")
+    .replace("&&homeArea(u)===`home`", "")
     .replace(new RegExp(`if\\(\\/\\* Codex：API-key 首页保持状态会话。 \\*\\/[\\s\\S]*?return;`), "");
   const result = patchSource(incomplete);
 
@@ -272,7 +274,7 @@ test("导航跟踪器不唯一时明确失败", () => {
   const source = fixture() + fixture()
     .replaceAll("Lhc", "Mhc").replaceAll("Sti", "Tti")
     .replaceAll("wti", "xti").replaceAll("Pjo", "Qjo")
-    .replaceAll("Rail", "Sail");
+    .replaceAll("Rail", "Sail").replaceAll("homeArea", "awayArea");
   const result = patchSource(source);
 
   assert.equal(result.status, "unexpected-shape");

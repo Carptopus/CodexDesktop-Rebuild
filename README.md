@@ -13,25 +13,29 @@ Cross-platform Electron build for OpenAI Codex Desktop App.
 ## Build
 
 ```bash
-# Install dependencies
-npm install
+# Install locked dependencies without native install scripts
+pnpm install --frozen-lockfile --ignore-scripts
+
+# Point downloads/extraction at an explicit disposable cache directory.
+# PowerShell: $env:CODEX_SYNC_DIR = Join-Path $env:TEMP "codex-rebuild"
+export CODEX_SYNC_DIR="${RUNNER_TEMP:-/tmp}/codex-rebuild"
 
 # Sync upstream resources, then apply all patches
-npm run sync
-npm run patch
+pnpm run sync
+pnpm run patch
 
 # Build for current platform
-npm run build
+pnpm run build
 
 # Build for specific platform
-npm run build:mac-x64
-npm run build:mac-arm64
-npm run build:win-x64
-npm run build:linux-x64
-npm run build:linux-arm64
+pnpm run build:mac-x64
+pnpm run build:mac-arm64
+pnpm run build:win-x64
+pnpm run build:linux-x64
+pnpm run build:linux-arm64
 
 # Build all platforms
-npm run build:all
+pnpm run build:all
 ```
 
 ## 补丁链路
@@ -41,7 +45,7 @@ npm run build:all
 - `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
 - `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
-- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并识别新版保存在路由 state 中的会话位置；当前会话点击首页保持不变，从设置等页面点击首页则恢复最近会话，避免直达空首页。ChatGPT、无认证及其他认证方式保持原有条件。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并复用官方首页区域分类器识别当前会话；当前会话点击首页保持不变，从设置等页面点击首页则恢复最近会话，避免直达空首页。ChatGPT、无认证及其他认证方式保持原有条件。
 - `patch-thread-timeline.js` 在当前 host 与 App Server 版本支持时启用官方 `thread/timeline/list` 历史路径，移除 API-key / 自定义 Provider 无法获得的远端灰度条件；版本兼容判断仍由官方逻辑负责。
 - `patch-mcp-status-refresh.js` 将短时间内的 MCP 启动状态通知合并为一次轻量目录刷新；Full 目录只标记为 stale、不在后台立即重拉，详细 MCP 页面后续仍按官方 Full 查询取得资源与模板。
 - `patch-remote-control.js` 只开放 Connections 设置入口；需要 ChatGPT 账户与 workspace routing 的 Remote Control 数据链继续遵守官方 gate，避免 API-key 模式反复建立无凭据的 Durable 连接。
@@ -55,14 +59,14 @@ npm run build:all
 - `sync-upstream.js`、`fetch-msstore.js` 和 `build-from-upstream.js` 强化 Windows x64 官方包选择与固定来源校验，支持精确版本和已验证原始 MSIX 重放；包身份、大小或 SHA-256 不符时拒绝构建，运行检查通过前不生成最终 ZIP。
 - `windows-artifacts.js` 与 `windows-maintenance.js` 记录官方来源和候选产物哈希，生成候选、验证发布门槛，并保证正式发布复用已经验收的同一 ZIP。
 - `windows-runtime-checks.js` 检查 Windows EXE / 原生模块架构及未修改组件哈希，实际加载 CUA、运行 code-mode host / rg 基础命令，并执行空白隔离桌面的启动、就绪和退出冒烟。
-- `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径，避免只凭补丁脚本成功退出判断功能可用。
+- `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径。这些属于补丁结构回归，只证明补丁仍能安全命中和拒绝未知结构；首页、主题、MCP 等运行效果仍以独立 GUI 验收项为准。
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
-- 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
+- 上游更新后应先执行 `pnpm run patch -- --check` 或完整 `pnpm run patch`，再运行测试和构建。
 
 ## Development
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 ## Project Structure
@@ -85,9 +89,9 @@ npm run dev
 
 ## CI/CD
 
-GitHub Actions automatically builds on:
-- Push to `master` / `main` and tag `v*` → build artifacts
-- 每日上游同步工作流：逐平台比较已保存的版本；仅在任一平台版本变化时下载上游、重新应用补丁、构建并更新 Release
+`Windows Candidate` 在面向 `master` 的 PR 上只运行语法、补丁和维护链回归检查，不下载或构建候选。推送到 `master`、`maintenance/**`、`candidate/**`，每日定时检查或手动触发时才构建候选 artifact；定时运行只有发现新的 Windows x64 官方版本时才构建。候选不会自动发布。
+
+候选完成真实 GUI 验收后，将审查过的验收 JSON 合入 `master`，再手动触发 `Promote Verified Windows Candidate`。晋升工作流下载并核对原候选 run 的同一 ZIP、源码提交、来源和全部必过验收项，然后创建 Release；不会重新打包替代已验收 ZIP。
 
 ### 上游补丁兼容检查
 
@@ -107,7 +111,7 @@ node scripts/patch-all.js mac-arm64 --check --report patch-reports/mac-arm64-che
 
 # 应用补丁，再构建
 node scripts/patch-all.js mac-arm64 --report patch-reports/mac-arm64-apply
-npm run build:mac-arm64
+pnpm run build:mac-arm64
 
 # 调试历史或单独解压的资源，可指定 src 根目录
 node scripts/patch-all.js win --check --source-dir /path/to/extracted/src --report patch-reports/win-check

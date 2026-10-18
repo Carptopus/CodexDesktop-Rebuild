@@ -193,6 +193,11 @@ function main() {
   const targets = findTargets(platform);
 
   if (targets.length === 0) {
+    const hasAssets = getPlatforms(platform).some((name) =>
+      fs.existsSync(path.join(SRC_DIR, name, "_asar", "webview", "assets")));
+    if (platform || hasAssets) {
+      throw new Error(`[${platform ?? "all"}] 模型选择器资源未知，不能跳过必要补丁`);
+    }
     console.log("  [skip] No model picker submenu bundle found");
     return;
   }

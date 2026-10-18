@@ -136,6 +136,7 @@ function main() {
   const check = args.includes("--check");
   const targets = locateTargets(platform);
   if (targets.length === 0) {
+    if (platform) throw new Error(`[${platform}] 缺少 Pet 菜单目标资源，不能跳过必要补丁`);
     console.log("[skip] Pet 菜单资源不适用于当前平台");
     return;
   }

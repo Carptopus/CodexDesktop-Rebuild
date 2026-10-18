@@ -9,29 +9,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
+const { literal: staticValue, walk } = require("./patch-ast-util");
 const { relPath, SRC_DIR } = require("./patch-util");
 
 const MARKER = "/* CodexRebuildMcpStatusRefresh */";
 const REFRESH_DELAY_MS = 250;
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
-
-function walk(node, visit) {
-  if (!node || typeof node !== "object") return;
-  if (node.type) visit(node);
-  for (const [key, value] of Object.entries(node)) {
-    if (["type", "start", "end"].includes(key)) continue;
-    if (Array.isArray(value)) value.forEach((child) => walk(child, visit));
-    else if (value?.type) walk(value, visit);
-  }
-}
-
-function staticValue(node) {
-  if (node?.type === "Literal") return node.value;
-  if (node?.type === "TemplateLiteral" && node.expressions.length === 0) {
-    return node.quasis[0].value.cooked;
-  }
-  return undefined;
-}
 
 function propertyName(member) {
   if (member?.type !== "MemberExpression") return null;

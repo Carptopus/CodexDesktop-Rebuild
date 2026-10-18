@@ -17,12 +17,14 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync, execFileSync } = require("child_process");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 const {
   findUpstreamCodex,
   getCodexBinarySource,
   getCometixCodexPackageSpec,
 } = require("./codex-binary-policy");
+const { resolveSyncDirectory } = require("./sync-upstream");
 
 const SRC = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -107,9 +109,41 @@ function copyRecursive(src, dest, skipFiles, skipDirs) {
 /**
  * Ensure the @cometix/codex platform package is extracted to a temp dir.
  * Returns the vendor root path (e.g. .../vendor/{triple}/) or null.
- * Caches the result so npm pack runs at most once per build.
+ * Caches the result so the registry package is fetched at most once per build.
  */
 let _vendorRootCache = null;
+
+function resolveCometixRegistryEntry(platform, metadata) {
+  const spec = getCometixCodexPackageSpec(platform, metadata?.["dist-tags"]);
+  const version = spec.slice(spec.lastIndexOf("@") + 1);
+  const dist = metadata?.versions?.[version]?.dist;
+  if (typeof dist?.tarball !== "string" || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(dist.integrity || "")) {
+    throw new Error(`@cometix/codex ${version} 缺少可验证的 registry tarball`);
+  }
+  const tarball = new URL(dist.tarball);
+  if (tarball.protocol !== "https:") throw new Error("@cometix/codex tarball 必须使用 HTTPS");
+  return { integrity: dist.integrity, spec, tarball: tarball.href, version };
+}
+
+function registryCurlArgs(url, destination) {
+  return ["--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+    "--retry", "3", "--retry-delay", "2",
+    "--connect-timeout", "30", "--output", destination, url];
+}
+
+function downloadRegistryFile(url, destination) {
+  const curl = process.platform === "win32" ? "curl.exe" : "curl";
+  execFileSync(curl, registryCurlArgs(url, destination), { stdio: "inherit" });
+}
+
+function verifyRegistryIntegrity(file, integrity) {
+  const expected = Buffer.from(integrity.slice("sha512-".length), "base64");
+  const actual = crypto.createHash("sha512").update(fs.readFileSync(file)).digest();
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    throw new Error("@cometix/codex registry tarball 完整性校验失败");
+  }
+}
+
 function ensureVendorExtracted(platform) {
   if (_vendorRootCache !== undefined && _vendorRootCache !== null) return _vendorRootCache;
 
@@ -131,40 +165,35 @@ function ensureVendorExtracted(platform) {
   const oldPath = path.join(PROJECT_ROOT, "node_modules", "@cometix", "codex", "vendor", triple);
   if (fs.existsSync(oldPath)) { _vendorRootCache = oldPath; return oldPath; }
 
-  // 3. npm pack platform package
-  let spec;
-  try {
-    const distTags = JSON.parse(
-      execSync("npm view @cometix/codex dist-tags --json", {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }),
-    );
-    spec = getCometixCodexPackageSpec(platform, distTags);
-  } catch (error) {
-    console.log(`   [!] unable to resolve @cometix/codex package: ${error.message}`);
-    return null;
-  }
-
-  console.log(`   [vendor] fetching ${spec} via npm pack...`);
-  const tmpDir = path.join(PROJECT_ROOT, ".cache", "vendor-pack");
+  // 3. 从 pnpm 配置的 registry 直接取得并校验包，避免生成额外全局缓存。
+  const tmpDir = path.join(resolveSyncDirectory(), "vendor-pack");
   if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
 
   try {
-    const tgzName = execSync(`npm pack ${spec} --pack-destination "${tmpDir}"`, {
-      cwd: tmpDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim().split("\n").pop();
+    const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+    const registryText = execFileSync(pnpm, ["config", "get", "registry"], {
+      cwd: PROJECT_ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+    }).trim() || "https://registry.npmjs.org/";
+    const registry = new URL(registryText.endsWith("/") ? registryText : `${registryText}/`);
+    if (registry.protocol !== "https:") throw new Error("pnpm registry 必须使用 HTTPS");
+    const metadataUrl = new URL("@cometix%2Fcodex", registry).href;
+    const metadataFile = path.join(tmpDir, "metadata.json");
+    downloadRegistryFile(metadataUrl, metadataFile);
+    const entry = resolveCometixRegistryEntry(platform, JSON.parse(fs.readFileSync(metadataFile, "utf-8")));
+    console.log(`   [vendor] fetching ${entry.spec} from pnpm registry...`);
+    const tarballFile = path.join(tmpDir, "package.tgz");
+    downloadRegistryFile(entry.tarball, tarballFile);
+    verifyRegistryIntegrity(tarballFile, entry.integrity);
 
     const extractDir = path.join(tmpDir, "extracted");
-    if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
     fs.mkdirSync(extractDir, { recursive: true });
-    execSync(`tar xzf "${path.join(tmpDir, tgzName)}" -C "${extractDir}"`, { stdio: "pipe" });
+    execFileSync("tar", ["xzf", tarballFile, "-C", extractDir], { stdio: "pipe" });
 
     const vendorRoot = path.join(extractDir, "package", "vendor", triple);
     if (fs.existsSync(vendorRoot)) { _vendorRootCache = vendorRoot; return vendorRoot; }
-  } catch (e) {
-    console.log(`   [!] npm pack failed: ${e.message}`);
+  } catch (error) {
+    console.log(`   [!] unable to fetch @cometix/codex package: ${error.message}`);
   }
 
   return null;
@@ -337,4 +366,6 @@ function main() {
   console.log(`   [ok] src/ ready for ${platform} build`);
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { registryCurlArgs, resolveCometixRegistryEntry, verifyRegistryIntegrity };

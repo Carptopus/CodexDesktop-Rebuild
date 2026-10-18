@@ -36,6 +36,7 @@ try {
   const discoveryPreload = path.join(temporary, "discovery-preload.cjs");
   write(discoveryPreload, `const target=require.resolve(${JSON.stringify(path.join(scriptRoot, "fetch-msstore.js"))}); require.cache[target]={id:target,filename:target,loaded:true,exports:{getCookie:async()=>"cookie",getAppInfo:async()=>({categoryId:"fixture"}),getFileList:async()=>["26.1007.9446.0","26.917.71314.0","26.1007.2314.0"].map(v=>({name:"OpenAI.Codex_"+v+"_x64__2p2nqsd0c76g0.msix",size:"10",digest:Buffer.alloc(20).toString("base64"),updateID:v,revisionNumber:"1"})),getDownloadUrl:async()=>"https://tlu.dl.delivery.mp.microsoft.com/fixture.msix"}};`);
   const discoveryOutput = path.join(temporary, "discovery.json");
+  const discoveryCache = path.join(temporary, "discovery-cache");
   const observed = path.join(temporary, "observed.json");
   json(observed, { schemaVersion: 1, upstream: { version: "26.1007.9446.0" } });
   const discovered = spawnSync(process.execPath, ["--require", discoveryPreload, path.join(scriptRoot, "windows-maintenance.js"), "discover", "--out", discoveryOutput, "--stable-manifest", observed], { encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "" } });
@@ -43,6 +44,17 @@ try {
   assert.match(discovered.stdout, /has_update=false/);
   assert.equal(JSON.parse(fs.readFileSync(discoveryOutput)).version, "26.1007.9446.0");
   checks++;
+  const missingDiscoveryCache = spawnSync(process.execPath, ["--require", discoveryPreload, path.join(scriptRoot, "windows-maintenance.js"), "discover"], {
+    encoding: "utf8", env: { ...process.env, CODEX_SYNC_DIR: "", GITHUB_OUTPUT: "" },
+  });
+  assert.notEqual(missingDiscoveryCache.status, 0);
+  assert.match(missingDiscoveryCache.stderr, /缺少 CODEX_SYNC_DIR/);
+  const cachedDiscovery = spawnSync(process.execPath, ["--require", discoveryPreload, path.join(scriptRoot, "windows-maintenance.js"), "discover"], {
+    encoding: "utf8", env: { ...process.env, CODEX_SYNC_DIR: discoveryCache, GITHUB_OUTPUT: "" },
+  });
+  assert.equal(cachedDiscovery.status, 0, cachedDiscovery.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(discoveryCache, "windows-discovery.json"))).version, "26.1007.9446.0");
+  checks += 2;
   json(observed, { schemaVersion: 1, upstream: { version: "26.1007.2314.0" } });
   const changed = spawnSync(process.execPath, ["--require", discoveryPreload, path.join(scriptRoot, "windows-maintenance.js"), "discover", "--out", discoveryOutput, "--stable-manifest", observed], { encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "" } });
   assert.equal(changed.status, 0, changed.stderr);
@@ -131,6 +143,16 @@ try {
     true,
   );
   checks++;
+
+  const missingRequiredRoot = path.join(temporary, "missing-required-targets");
+  fs.mkdirSync(path.join(missingRequiredRoot, "win", "_asar", "webview", "assets"), { recursive: true });
+  run("patch-hide-pet-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+  run("patch-model-picker-submenu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+  fs.writeFileSync(
+    path.join(missingRequiredRoot, "win", "_asar", "webview", "assets", "archived-list.js"),
+    "client.sendRequest(`thread/list`,{archived:!0,modelProviders:null});",
+  );
+  run("patch-archive-delete.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
 
   const pickerRoot = path.join(temporary, "picker");
   const pickerFile = path.join(pickerRoot, "win", "_asar", "webview", "assets", "model-picker.js");

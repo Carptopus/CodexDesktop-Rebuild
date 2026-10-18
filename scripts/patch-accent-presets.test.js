@@ -58,6 +58,7 @@ test("无账户主题时启用本地预设并保留加载态禁用", () => {
   assert.match(result.source, new RegExp(MODULE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(result.source, /__codexCurrentAccent/);
   assert.match(result.source, /disabled:u===void 0/);
+  assert.match(result.source, /__codexAccentSelection\(u,r\.accentSource,/);
   assert.match(result.source, /__codexSelectAccentPreset\(u,e,\(\)=>o\(r\.accent\),\(\)=>a\(/);
   assert.match(result.source, /onChange:__codexColor=>__codexUseCustomAccent\(o,__codexColor\)/);
   assert.equal(patchSettingsSource(result.source).status, "already-patched");
@@ -74,7 +75,7 @@ test("设置组件在属性解构后才读取主题", () => {
   )(
     () => "color", ["default", "blue"], () => ({ get: () => null }), () => null, {}, {},
     (_type, props) => props, "radio", "color", {}, {}, () => {}, () => {},
-    (_accountTheme, fallback) => fallback,
+    (_accountTheme, _accentSource, fallback) => fallback,
     () => Promise.resolve(),
     (onChange, value) => onChange(value),
   );
@@ -113,7 +114,7 @@ test("主题函数唯一注入本地预设解析器并保持幂等", () => {
   assert.equal(patchThemeSource(result.source).status, "already-patched");
 });
 
-test("本地设置、账户优先和自定义清理使用同一预设状态", async () => {
+test("本地设置、账户同步和自定义清理使用同一预设状态", async () => {
   const runtime = await runtimeModule();
   const storage = fakeStorage();
   globalThis.localStorage = storage;
@@ -123,16 +124,35 @@ test("本地设置、账户优先和自定义清理使用同一预设状态", as
 
   await runtime.selectAccentPreset(null, "blue", () => { localCalls++; }, () => { accountCalls++; });
   assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "blue");
-  assert.equal(runtime.accentPresetSelection(null, "custom"), "blue");
-  assert.equal(runtime.accentPresetSelection(undefined, "custom"), "custom");
+  assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "blue");
+  assert.equal(runtime.accentPresetSelection({ chatTheme: "green" }, "custom", "custom"), "blue");
+  assert.equal(runtime.accentPresetSelection(undefined, "custom", "custom"), "custom");
+  assert.equal(runtime.accentPresetSelection({ chatTheme: "green" }, "chatgpt", "green"), "green");
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   assert.equal(localCalls, 1);
   assert.equal(accountCalls, 0);
 
   await runtime.selectAccentPreset({ chatTheme: "green" }, "green", () => { localCalls++; }, () => { accountCalls++; });
-  assert.equal(storage.values.has(runtime.ACCENT_PRESET_STORAGE_KEY), false);
+  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "green");
   assert.equal(accountCalls, 1);
 
+  globalThis.localStorage = {
+    getItem: () => null,
+    setItem: () => { throw new Error("storage unavailable"); },
+    removeItem: () => {},
+  };
+  await runtime.selectAccentPreset({ chatTheme: "purple" }, "purple", () => { localCalls++; }, () => { accountCalls++; });
+  assert.equal(accountCalls, 2);
+
+  await runtime.selectAccentPreset({ chatTheme: "future" }, "future-preset", () => { localCalls++; }, () => { accountCalls++; });
+  assert.equal(accountCalls, 3);
+  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "green");
+
+  await runtime.selectAccentPreset(null, "future-preset", () => { localCalls++; }, () => { accountCalls++; });
+  assert.equal(accountCalls, 4);
+  assert.equal(localCalls, 1);
+
+  globalThis.localStorage = storage;
   storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
   runtime.useCustomAccent(value => { customValue = value; }, "#123456");
   assert.equal(customValue, "#123456");
@@ -145,7 +165,7 @@ test("预设解析补齐官方默认有效色并拒绝无效本地值", async ()
   globalThis.localStorage = storage;
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   assert.equal(runtime.resolveAccentPreset("chatgpt", "green"), "green");
-  assert.equal(runtime.resolveAccentPreset("custom", "green"), null);
+  assert.equal(runtime.resolveAccentPreset("custom", "green"), "blue");
 
   for (const preset of ["blue", "black"]) {
     storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);
@@ -177,8 +197,8 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
 
   const accountGreen = theme.Tba({ accentSource: "chatgpt", accent: "#custom" }, "light", "green");
   assert.equal(accountGreen["--color-background-user-message"], "#green-bubble");
-  const accountCustom = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", "green");
-  assert.equal(accountCustom["--color-background-user-message"], "neutral-bubble");
+  const localWithAccountData = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", "green");
+  assert.equal(localWithAccountData["--color-background-user-message"], "#blue-bubble");
 
   for (const preset of ["blue", "black"]) {
     storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);

@@ -35,9 +35,6 @@ https.globalAgent.options.ca = extraCAs;
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
-const TEMP_DIR = process.env.CODEX_SYNC_DIR
-  ? path.resolve(process.env.CODEX_SYNC_DIR)
-  : path.join(PROJECT_ROOT, ".cache", "upstream-sync");
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
@@ -50,6 +47,16 @@ const FORCE = args.includes("--force");
 const CHECK_ONLY = args.includes("--check-only");
 const SKIP_MAC = args.includes("--skip-mac");
 const SKIP_WIN = args.includes("--skip-win");
+
+function resolveSyncDirectory() {
+  const configured = process.env.CODEX_SYNC_DIR?.trim();
+  if (!configured) {
+    throw new Error(
+      "缺少 CODEX_SYNC_DIR；请由维护入口显式提供可丢弃缓存目录，禁止回退到仓库 .cache",
+    );
+  }
+  return path.resolve(configured);
+}
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -213,12 +220,13 @@ function clearDir(dir) {
 }
 
 function removeObsoletePackages(currentFile, pattern) {
-  if (!fs.existsSync(TEMP_DIR)) return [];
   const keep = path.resolve(currentFile);
+  const directory = path.dirname(keep);
+  if (!fs.existsSync(directory)) return [];
   const removed = [];
-  for (const entry of fs.readdirSync(TEMP_DIR, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     if (!entry.isFile() || !pattern.test(entry.name)) continue;
-    const file = path.join(TEMP_DIR, entry.name);
+    const file = path.join(directory, entry.name);
     if (path.resolve(file) === keep) continue;
     fs.rmSync(file, { force: true });
     removed.push(entry.name);
@@ -442,14 +450,16 @@ function validateWindowsPackage(extractDir, expected) {
 // ─── Extract macOS ──────────────────────────────────────────────
 
 async function syncMac(variant, appcastUrl, destDir) {
+  const tempDir = resolveSyncDirectory();
+  fs.mkdirSync(tempDir, { recursive: true });
   const label = `macOS-${variant}`;
   console.log(`\n-- ${label}`);
 
   const info = await getAppcastVersion(appcastUrl);
   console.log(`   version: ${info.version} (build ${info.build})`);
 
-  const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
-  const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
+  const zipPath = path.join(tempDir, `Codex-${variant}-${info.version}.zip`);
+  const extractDir = path.join(tempDir, `${variant}-extract`);
   const variantPattern = new RegExp(`^Codex-${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-.*\\.zip$`, "i");
   removeObsoletePackages(zipPath, variantPattern);
 
@@ -473,12 +483,14 @@ async function syncMac(variant, appcastUrl, destDir) {
 // ─── Extract Windows ────────────────────────────────────────────
 
 async function syncWin(destDir, info) {
+  const tempDir = resolveSyncDirectory();
+  fs.mkdirSync(tempDir, { recursive: true });
   console.log("\n-- Windows");
   console.log(`   package: ${info.packageName}`);
   console.log(`   version: ${info.version} (${info.architecture})`);
 
-  const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
-  const extractDir = path.join(TEMP_DIR, "win-extract");
+  const msixPath = path.join(tempDir, info.packageName || `codex-win-${info.version}.msix`);
+  const extractDir = path.join(tempDir, "win-extract");
   removeObsoletePackages(msixPath, /^OpenAI\.Codex_.*_x64__.*\.msix$/i);
 
   if (info.localPackage) {
@@ -565,7 +577,6 @@ function saveVersions(v) {
 
 async function main() {
   console.log("== Codex upstream sync ==\n");
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
 
   const results = {};
 
@@ -629,6 +640,7 @@ module.exports = {
   selectWindowsPackage,
   validateWindowsPackage,
   removeObsoletePackages,
+  resolveSyncDirectory,
 };
 
 if (require.main === module) {
