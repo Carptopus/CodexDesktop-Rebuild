@@ -69,10 +69,7 @@ function patchSource(source) {
       next = next.replace(edit.anchor, edit.replacement);
     }
     if (!next.includes(MARKER)) {
-      const q = String.fromCharCode(34);
-      const boot = 'import ' + q + './codex-rebuild-reading-width.js' + q + ';';
-      if (!next.includes(boot)) throw new Error('e2');
-      next = next.replace(boot, boot + MARKER);
+      next = MARKER + next;
     }
     parse(next, { ecmaVersion: 'latest', sourceType: 'module' });
     return { status: 'patched', source: next };
