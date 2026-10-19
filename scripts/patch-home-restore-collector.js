@@ -9,9 +9,9 @@ const ANCHOR = 'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-c
 const COLLECTOR = [
   'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',(ce,we)=>{try{',
   'we.webContents.on(' + String.fromCharCode(96) + 'console-message' + String.fromCharCode(96) + ',(Ee,Se,Ie)=>{try{',
-  'const De=typeof Ie===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Ie:typeof Se===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Se:Ee?.message;',
-  'if(typeof De===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '&&De.includes(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '))',
-  'fs.appendFileSync(' + String.fromCharCode(39) + 'Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl' + String.fromCharCode(39) + ',De.slice(De.indexOf(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '))+' + String.fromCharCode(39) + '\\n' + String.fromCharCode(39) + ')',
+  'const De=[Ee?.message,Se?.message,typeof Se===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Se:null,Ie?.message,typeof Ie===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Ie:null].find(xe=>typeof xe===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '&&xe.includes(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
+  'if(De!=null){const xe=De.slice(De.indexOf(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
+  'fs.appendFileSync(' + String.fromCharCode(39) + 'Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl' + String.fromCharCode(39) + ',xe+' + String.fromCharCode(39) + '\\n' + String.fromCharCode(39) + ')}',
   '}catch(xe){}})}catch(xe){}}),',
 ].join('');
 

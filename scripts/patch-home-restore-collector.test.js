@@ -22,7 +22,7 @@ function captureConsole(source, options, legacy) {
   const we = { webContents };
   vm.runInNewContext(source.slice(start, end), { O: { default: { app } }, app, fs, we });
   appHandler({}, we);
-  consoleHandler(...(legacy ? ['old-api', options.level, options.message] : [options]));
+  consoleHandler(...(legacy ? ['old-api', options.level, options.message] : ['new-api', options]));
   return written;
 }
 
