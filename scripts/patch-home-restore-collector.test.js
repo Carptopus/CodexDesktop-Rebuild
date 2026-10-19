@@ -88,3 +88,27 @@ test('renderer console events use the same listener', () => {
   assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'), /__codexHomeRestoreDiag payload/);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('renderer diagnostics using the DIAG prefix are captured', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-collector-diagnostic-'));
+  const source = patchSource('const e=require(' + JSON.stringify('electron') + ');').source.replace(
+    JSON.stringify('Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl'),
+    JSON.stringify(path.join(root, 'diag.jsonl')),
+  );
+  let webContentsHandler;
+  let rendererHandler;
+  const app = { on: (event, callback) => { if (event === 'web-contents-created') webContentsHandler = callback; } };
+  const webContents = {
+    isDestroyed: () => false,
+    on: (_event, callback) => { rendererHandler = callback; },
+  };
+  vm.runInNewContext(source, {
+    require: (name) => name === 'electron'
+      ? { app, BrowserWindow: { getAllWindows: () => [] } }
+      : require(name),
+  });
+  webContentsHandler({}, webContents);
+  rendererHandler({ level: 3 }, { message: 'DIAG tVa.enter' });
+  assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'), /DIAG tVa\.enter/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
