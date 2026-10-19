@@ -19,12 +19,14 @@ function targetDirectories(platform) {
 }
 function stmt(tag, expression) {
   const entry = '({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '})';
-  const report = JSON.stringify('DIAG ' + tag);
-  return '(window.' + PREFIX + '??=[]).push(' + entry + '),globalThis.console.log(' + report + ');';
+  return '(window.' + PREFIX + '??=[]).push(' + entry + '),globalThis.console.log(' + JSON.stringify('DIAG ' + tag) + ',JSON.stringify(' + expression + '));';
 }
 function logCall(tag, expression) {
-  const report = JSON.stringify('DIAG ' + tag + ' ' + expression);
-  return '(window.' + PREFIX + '??=[]).push({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '}),globalThis.console.log(' + report + ');';
+  return '(window.' + PREFIX + '??=[]).push({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '}),globalThis.console.log(' + JSON.stringify('DIAG ' + tag) + ',JSON.stringify(' + expression + '));';
+}
+function replaceUnique(source, anchor, replacement, message) {
+  if (source.split(anchor).length - 1 !== 1) throw new Error(message);
+  return source.replace(anchor, replacement);
 }
 function patchSource(source) {
   if (source.includes(MARKER)) return { status: 'already-patched', source };
@@ -35,44 +37,31 @@ function patchSource(source) {
   try {
     parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
     let next = source;
-    const edits = [];
     const writerAnchor = 'u=()=>{QBa(t,{accountKey:l,location:n,productMode:s})}';
-    if (next.split(writerAnchor).length - 1 !== 1) throw new Error('首页写入端锚点缺失');
-    edits.push({
-      anchor: writerAnchor,
-      replacement: 'u=()=>{'
-        + logCall('cuu.write', '{accountKey:l,pathname:n?.pathname,state:n?.state}')
-        + 'QBa(t,{accountKey:l,location:n,productMode:s})}',
-    });
+    next = replaceUnique(next, writerAnchor,
+      'u=()=>{'
+      + logCall('cuu.write', '{accountKey:l,pathname:n?.pathname,state:n?.state}')
+      + 'QBa(t,{accountKey:l,location:n,productMode:s})}',
+      '首页写入端锚点缺失');
     const tVaHead='function tVa(e,{accountKey:t,auth:n,area:r,navigate:i,productMode:a,state:o}){let s=e.get(AE),c=e.get(ch);';
-    if (next.split(tVaHead).length - 1 !== 1) throw new Error('tVa head anchor missing');
-    edits.push({
-      anchor: tVaHead,
-      replacement: tVaHead + stmt('tVa.enter', '{accountKey:t,area:r,current:c?.pathname,currentState:c?.state}'),
-    });
-
+    next = replaceUnique(next, tVaHead,
+      tVaHead + stmt('tVa.enter', '{accountKey:t,area:r,current:c?.pathname,currentState:c?.state}'),
+      'tVa head anchor missing');
     const consumerAnchor = ',gO=Y(U,({get:e})=>{let t=e(ch)?.state?.sidebarThreadLocationId;';
-    if (next.split(consumerAnchor).length - 1 !== 1) throw new Error('首页消费端锚点缺失');
-    edits.push({
-      anchor: consumerAnchor,
-      replacement: ',gO=Y(U,({get:e})=>{'
-        + stmt('gO.read', '{pathname:e(ch)?.pathname,state:e(ch)?.state}')
-        + 'let t=e(ch)?.state?.sidebarThreadLocationId;',
-    });
+    next = replaceUnique(next, consumerAnchor,
+      ',gO=Y(U,({get:e})=>{'
+      + stmt('gO.read', '{pathname:e(ch)?.pathname,state:e(ch)?.state}')
+      + 'let t=e(ch)?.state?.sidebarThreadLocationId;',
+      '首页消费端锚点缺失');
     const navAnchor = 'function nVa(e,t,n){let r=e.get(eh).prepareNavigation(gc(t.location),{state:{...t.location.state,...n}});return r!=null&&';
-    if (next.split(navAnchor).length - 1 !== 1) throw new Error('首页跳转端锚点缺失');
-    edits.push({
-      anchor: navAnchor,
-      replacement: 'function nVa(e,t,n){'
-        + stmt('nVa.enter', '{target:t.location?.pathname,mergedState:{...t.location?.state,...n}}')
-        + 'let r=e.get(eh).prepareNavigation(gc(t.location),{state:{...t.location.state,...n}});'
-        + stmt('nVa.prepared', '{prepared:r!=null}')
-        + 'return r!=null&&',
-    });
-    for (const edit of edits) {
-      if (!next.includes(edit.anchor)) throw new Error('e1');
-      next = next.replace(edit.anchor, edit.replacement);
-    }
+    next = replaceUnique(next, navAnchor,
+      'function nVa(e,t,n){'
+      + stmt('nVa.enter', '{target:t.location?.pathname,targetSearch:t.location?.search,targetState:t.location?.state,mergedState:{...t.location?.state,...n}}')
+      + 'let r=e.get(eh).prepareNavigation(gc(t.location),{state:{...t.location.state,...n}}),diagPreparedTarget=gc(t.location);'
+      + stmt('nVa.preparedTarget', 'diagPreparedTarget')
+      + stmt('nVa.prepared', '{prepared:r!=null}')
+      + 'return r!=null&&',
+      '首页跳转端锚点缺失');
     if (!next.includes(MARKER)) {
       next = MARKER + next;
     }

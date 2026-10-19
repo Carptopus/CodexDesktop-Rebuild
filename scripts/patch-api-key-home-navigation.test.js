@@ -55,6 +55,7 @@ function clickHome(source, {
   const current = currentArea == null ? null : {
     area: currentArea === "home" ? null : currentArea,
     hash: `same`,
+    pathname: currentArea === "settings" ? "/settings/general" : "/thread/current",
     state: { sidebarProductMode: "codex", sidebarThreadLocationId },
   };
   const rememberedValue = hasRemembered ? {
@@ -137,7 +138,7 @@ test("API-key 没有首页记录时保留官方根路由 fallback", () => {
   const result = patchSource(fixture());
 
   assert.deepEqual(clickHome(result.source, {
-    currentArea: "settings",
+    currentArea: "scheduled",
     sidebarThreadLocationId: null,
     hasRemembered: false,
   }), ["/"]);

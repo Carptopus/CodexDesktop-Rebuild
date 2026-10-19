@@ -84,7 +84,7 @@ test('renderer console events use the same listener', () => {
       : require(name),
   });
   webContentsHandler({}, webContents);
-  rendererHandler({ level: 3 }, { message: 'DIAG __codexHomeRestoreDiag payload' });
+  rendererHandler({ level: 3, message: 'DIAG __codexHomeRestoreDiag payload' });
   assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'), /__codexHomeRestoreDiag payload/);
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -108,7 +108,34 @@ test('renderer diagnostics using the DIAG prefix are captured', () => {
       : require(name),
   });
   webContentsHandler({}, webContents);
-  rendererHandler({ level: 3 }, { message: 'DIAG tVa.enter' });
-  assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'), /DIAG tVa\.enter/);
+  rendererHandler({ level: 3, message: 'DIAG tVa.enter' }, '{"current":"/local/thread-a"}');
+  const text = fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8');
+  assert.match(text, /DIAG tVa\.enter/);
+  assert.match(text, /\{"current":"\/local\/thread-a"\}/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('modern Electron details payload preserves both diagnostic values', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-collector-details-'));
+  const source = patchSource('const e=require(' + JSON.stringify('electron') + ');').source.replace(
+    JSON.stringify('Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl'),
+    JSON.stringify(path.join(root, 'diag.jsonl')),
+  );
+  let webContentsHandler;
+  let rendererHandler;
+  const app = { on: (event, callback) => { if (event === 'web-contents-created') webContentsHandler = callback; } };
+  const webContents = {
+    isDestroyed: () => false,
+    on: (_event, callback) => { rendererHandler = callback; },
+  };
+  vm.runInNewContext(source, {
+    require: (name) => name === 'electron'
+      ? { app, BrowserWindow: { getAllWindows: () => [] } }
+      : require(name),
+  });
+  webContentsHandler({}, webContents);
+  rendererHandler({ level: 3, message: 'DIAG tVa.enter' }, '{"current":"/local/thread-a"}');
+  assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'),
+    /DIAG tVa\.enter \{"current":"\/local\/thread-a"\}/);
   fs.rmSync(root, { recursive: true, force: true });
 });

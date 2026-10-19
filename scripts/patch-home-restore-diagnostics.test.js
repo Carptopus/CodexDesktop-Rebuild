@@ -32,7 +32,10 @@ test('diagnostics inject anchors and are idempotent', () => {
   assert.match(result.source, /gO\.read/);
   assert.match(result.source, /nVa\.enter/);
   assert.match(result.source, /nVa\.prepared/);
-  assert.match(result.source, /globalThis\.console\.log\("DIAG gO\.read"\)/);
+  assert.match(result.source, /nVa\.preparedTarget/);
+  assert.match(result.source, /targetSearch:t\.location\?\.search/);
+  assert.match(result.source, /targetState:t\.location\?\.state/);
+  assert.match(result.source, /globalThis\.console\.log\("DIAG gO\.read",JSON\.stringify\(/);
   const repeated = patchSource(result.source);
   assert.equal(repeated.status, 'already-patched');
   assert.equal(repeated.source, result.source);
@@ -41,4 +44,12 @@ test('diagnostics inject anchors and are idempotent', () => {
 test('unrelated bundle stays not-applicable', () => {
   const result = patchSource('function unrelated(){return 1}');
   assert.equal(result.status, 'not-applicable');
+});
+
+test('diagnostic payloads are evaluated, not logged as source text', () => {
+  const result = patchSource(fixture());
+  assert.equal(result.status, 'patched');
+  assert.doesNotMatch(result.source, /DIAG cuu\.write \{accountKey:l/);
+  assert.match(result.source, /console\.log\("DIAG cuu\.write",JSON\.stringify\(\{accountKey:l/);
+  assert.match(result.source, /console\.log\("DIAG tVa\.enter",JSON\.stringify\(/);
 });
