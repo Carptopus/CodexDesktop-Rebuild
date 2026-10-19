@@ -32,6 +32,7 @@ test('diagnostics inject anchors and are idempotent', () => {
   assert.match(result.source, /gO\.read/);
   assert.match(result.source, /nVa\.enter/);
   assert.match(result.source, /nVa\.prepared/);
+  assert.match(result.source, /globalThis\.console\.log\("DIAG gO\.read"\)/);
   const repeated = patchSource(result.source);
   assert.equal(repeated.status, 'already-patched');
   assert.equal(repeated.source, result.source);
