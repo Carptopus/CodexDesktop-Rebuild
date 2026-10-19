@@ -94,7 +94,11 @@ function main() {
         .map((name) => ({ name, path: path.join(directory.path, name) }))
         .map((file) => ({ file, result: patchSource(fs.readFileSync(file.path, 'utf8')) }))
         .filter((item) => item.result.status !== 'not-applicable');
-      if (results.length !== 1) throw new Error('bundle-count ' + results.length);
+      if (results.length > 1) throw new Error('bundle-count ' + results.length);
+      if (!results.length) {
+        console.log('    [skip] api-key home patch not applied yet; diagnostics not applicable');
+        continue;
+      }
       const target = results[0];
       if (target.result.status === 'unexpected-shape') throw new Error(target.result.reason);
       console.log('  [' + directory.platform + '] ' + relPath(target.file.path));
