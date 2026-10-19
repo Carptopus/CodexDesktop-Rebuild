@@ -1,70 +1,90 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const vm = require('node:vm');
 const { MARKER, patchSource } = require('./patch-home-restore-collector');
 
-function fixture() {
-  const tick = String.fromCharCode(96);
-  return 'const e=require(' + JSON.stringify('node:events') + '),O=e.a(require(' + JSON.stringify('electron') + '),1);function attach(n,r){let a=(e,t)=>{},i=()=>{};return O.default.app.on(' + tick + 'browser-window-created' + tick + ',a),n.push(()=>{O.default.app.removeListener(' + tick + 'browser-window-created' + tick + ',a)}),i}';
-}
-
-function captureConsole(source, options, legacy) {
-  const tick = String.fromCharCode(96);
-  const first = 'O.default.app.on(' + tick + 'browser-window-created' + tick + ',a),';
-  const start = source.indexOf(first) + first.length;
-  const end = source.indexOf(',n.push(', start);
-  let appHandler;
-  let consoleHandler;
-  let written;
-  const fs = { appendFileSync: (_file, data) => { written = data; } };
-  const app = { on: (_event, callback) => { appHandler = callback; } };
-  const webContents = { on: (_event, callback) => { consoleHandler = callback; } };
-  const we = { webContents };
-  vm.runInNewContext(source.slice(start, end), { O: { default: { app } }, app, fs, we });
-  appHandler({}, we);
-  consoleHandler(...(legacy ? ['old-api', options.level, options.message] : ['new-api', options]));
-  return written;
-}
-
-test('collector patches actual main-process listener and forwards both Electron signatures', () => {
-  const patched = patchSource(fixture());
+test('collector runs at main entry and captures both console payloads', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-collector-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const original = 'const electron=require(' + JSON.stringify('electron') + ');globalThis.entryExecuted=true;';
+  const patched = patchSource(original);
   assert.equal(patched.status, 'patched');
-  assert.ok(patched.source.includes(MARKER));
-  assert.ok(patched.source.includes('app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96)));
+  assert.ok(patched.source.startsWith(MARKER));
   assert.equal(patchSource(patched.source).status, 'already-patched');
-  assert.equal(
-    captureConsole(patched.source, { level: 3, message: 'DIAG __codexHomeRestoreDiag new' }),
-    '__codexHomeRestoreDiag new\n',
+
+  const appHandlers = new Map();
+  const consoleHandlers = [];
+  const mainWindow = {
+    webContents: {
+      isDestroyed: () => false,
+      on: (event, callback) => {
+        assert.equal(event, 'console-message');
+        consoleHandlers.push(callback);
+      },
+    },
+  };
+  const app = { on: (event, callback) => appHandlers.set(event, callback) };
+  const fakeRequire = (name) => {
+    if (name === 'electron') return { app, BrowserWindow: { getAllWindows: () => [mainWindow] } };
+    return require(name);
+  };
+  const context = {
+    require: fakeRequire,
+    console: { warn: (value) => { throw new Error(value); } },
+  };
+  vm.runInNewContext(patched.source, context);
+  assert.equal(context.entryExecuted, true);
+  assert.equal(consoleHandlers.length, 1);
+
+  const replacement = patched.source.replace(
+    JSON.stringify('Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl'),
+    JSON.stringify(path.join(root, 'diag.jsonl')),
   );
-  assert.equal(
-    captureConsole(patched.source, { level: 3, message: 'DIAG __codexHomeRestoreDiag old' }, true),
-    '__codexHomeRestoreDiag old\n',
-  );
+  assert.notEqual(replacement, patched.source);
+  const isolatedConsoleHandlers = [];
+  const isolatedMain = {
+    webContents: {
+      isDestroyed: () => false,
+      on: (_event, callback) => isolatedConsoleHandlers.push(callback),
+    },
+  };
+  const isolatedApp = { on: () => {} };
+  vm.runInNewContext(replacement, {
+    require: (name) => name === 'electron'
+      ? { app: isolatedApp, BrowserWindow: { getAllWindows: () => [isolatedMain] } }
+      : require(name),
+  });
+  const log = path.join(root, 'diag.jsonl');
+  assert.match(fs.readFileSync(log, 'utf8'), /collector-ready/);
+  isolatedConsoleHandlers[0]({ message: 'DIAG __codexHomeRestoreDiag details' });
+  isolatedConsoleHandlers[0]('old', 3, 'DIAG __codexHomeRestoreDiag old');
+  assert.match(fs.readFileSync(log, 'utf8'), /__codexHomeRestoreDiag details/);
+  assert.match(fs.readFileSync(log, 'utf8'), /__codexHomeRestoreDiag old/);
 });
 
-test('collector also accepts a webContents payload', () => {
-  const patched = patchSource(fixture());
-  const tick = String.fromCharCode(96);
-  const first = 'O.default.app.on(' + tick + 'browser-window-created' + tick + ',a),';
-  const start = patched.source.indexOf(first) + first.length;
-  const end = patched.source.indexOf(',n.push(', start);
-  let appHandler;
-  let messageHandler;
-  let written;
-  const fs = { appendFileSync: (_file, data) => { written = data; } };
-  const app = { on: (_event, callback) => { appHandler = callback; } };
+test('renderer console events use the same listener', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-collector-payload-'));
+  const source = patchSource('const e=require(' + JSON.stringify('electron') + ');').source.replace(
+    JSON.stringify('Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl'),
+    JSON.stringify(path.join(root, 'diag.jsonl')),
+  );
+  let webContentsHandler;
+  let rendererHandler;
+  const app = { on: (event, callback) => { if (event === 'web-contents-created') webContentsHandler = callback; } };
   const webContents = {
     isDestroyed: () => false,
-    on: (_event, callback) => { messageHandler = callback; },
+    on: (_event, callback) => { rendererHandler = callback; },
   };
-  vm.runInNewContext(patched.source.slice(start, end), { O: { default: { app } }, app, fs });
-  appHandler({}, webContents);
-  assert.equal(typeof messageHandler, 'function');
-  messageHandler('legacy', 3, 'DIAG __codexHomeRestoreDiag payload');
-  assert.equal(written, '__codexHomeRestoreDiag payload\n');
-});
-
-test('collector needs the evaluated main-process window listener', () => {
-  assert.equal(patchSource('unrelated').status, 'not-applicable');
-  assert.equal(patchSource('browser-window-created O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',a),').status, 'unexpected-shape');
+  vm.runInNewContext(source, {
+    require: (name) => name === 'electron'
+      ? { app, BrowserWindow: { getAllWindows: () => [] } }
+      : require(name),
+  });
+  webContentsHandler({}, webContents);
+  rendererHandler({ level: 3 }, { message: 'DIAG __codexHomeRestoreDiag payload' });
+  assert.match(fs.readFileSync(path.join(root, 'diag.jsonl'), 'utf8'), /__codexHomeRestoreDiag payload/);
+  fs.rmSync(root, { recursive: true, force: true });
 });

@@ -1,31 +1,27 @@
 #!/usr/bin/env node
-/** 临时诊断采集器：把首页恢复链路的 console 调用结果追加到专用 JSONL。 */
+/** 临时诊断采集器：在主进程入口顶部订阅所有窗口的 console 消息并追加到专用 JSONL。 */
 const fs = require('node:fs');
 const path = require('node:path');
 const { relPath, SRC_DIR } = require('./patch-util');
 const MARKER = '/* CodexRebuildHomeRestoreDiagCollector */';
 const PLATFORMS = ['mac-arm64', 'mac-x64', 'win'];
-const ANCHOR = 'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',a),';
-const COLLECTOR = [
-  'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',(ce,we)=>{try{',
-  'const webContents=we?.webContents??we;',
-  'if(webContents?.isDestroyed?.())return;',
-  'const hookMessage=(Ee,Se,Ie)=>{try{',
-  'const De=[Ee?.message,Se?.message,typeof Se===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Se:null,Ie?.message,typeof Ie===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Ie:null].find(xe=>typeof xe===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '&&xe.includes(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
-  'if(De!=null){const xe=De.slice(De.indexOf(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
-  'fs.appendFileSync(' + String.fromCharCode(39) + 'Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl' + String.fromCharCode(39) + ',xe+' + String.fromCharCode(39) + '\\n' + String.fromCharCode(39) + ')}',
-  '}catch(xe){}};',
-  'webContents?.on?.(' + String.fromCharCode(96) + 'console-message' + String.fromCharCode(96) + ',hookMessage);',
-  'if(webContents?.isDestroyed?.())return;',
-  '}catch(xe){}}),',
+const INJECT = [
+  '/* CodexRebuildHomeRestoreDiagCollector */',
+  '(()=>{try{const electron=require(' + JSON.stringify('electron') + '),fs=require(' + JSON.stringify('node:fs') + '),app=electron.app;',
+  'const output=' + JSON.stringify('Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl') + ';',
+  'const write=(value)=>{if(typeof value!==' + JSON.stringify('string') + '||!value.includes(' + JSON.stringify('__codexHomeRestoreDiag') + '))return;try{fs.appendFileSync(output,value.slice(value.indexOf(' + JSON.stringify('__codexHomeRestoreDiag') + '))+' + JSON.stringify('\n') + ')}catch{}};',
+  'const hook=(webContents)=>{try{if(webContents==null||webContents.isDestroyed?.())return;webContents.on(' + JSON.stringify('console-message') + ',(event,level,message,line,sourceId)=>write([event?.message,level?.message,typeof level===' + JSON.stringify('string') + '?level:null,message?.message,typeof message===' + JSON.stringify('string') + '?message:null].find(value=>typeof value===' + JSON.stringify('string') + '&&value.includes(' + JSON.stringify('__codexHomeRestoreDiag') + '))))}catch{}};',
+  'app.on(' + JSON.stringify('web-contents-created') + ',(event,webContents)=>hook(webContents));',
+  'app.on(' + JSON.stringify('browser-window-created') + ',(event,window)=>hook(window?.webContents??window));',
+  'for(const window of electron.BrowserWindow.getAllWindows())hook(window.webContents);',
+  'write(' + JSON.stringify('__codexHomeRestoreDiag collector-ready') + ');',
+  '}catch{}})();',
 ].join('');
 
 function patchSource(source) {
   if (source.includes(MARKER)) return { status: 'already-patched', source };
-  if (!source.includes('browser-window-created')) return { status: 'not-applicable', source };
   try {
-    if (source.split(ANCHOR).length - 1 !== 1) throw new Error('main listener anchor count ' + (source.split(ANCHOR).length - 1));
-    const next = source.replace(ANCHOR, ANCHOR + COLLECTOR) + MARKER;
+    const next = INJECT + source;
     require('acorn').parse(next, { ecmaVersion: 'latest', sourceType: 'module' });
     return { status: 'patched', source: next };
   } catch (error) {
@@ -48,8 +44,7 @@ function main() {
       const results = fs.readdirSync(directory.path)
         .filter((name) => /^main-.*\.js$/.test(name))
         .map((name) => ({ name, source: fs.readFileSync(path.join(directory.path, name), 'utf8') }))
-        .map((item) => ({ ...item, result: patchSource(item.source) }))
-        .filter((item) => item.result.status !== 'not-applicable');
+        .map((item) => ({ ...item, result: patchSource(item.source) }));
       if (results.length !== 1) throw new Error('main bundle count ' + results.length);
       const target = results[0];
       if (target.result.status === 'unexpected-shape') throw new Error(target.result.reason);
