@@ -22,6 +22,7 @@ const PATCH_POLICY = [
   { script: "patch-test-isolation.js", feature: "Windows 验收数据隔离" },
   { script: "patch-provider-quota.js", feature: "真实 Provider 额度发送门槛" },
   { script: "patch-api-key-home-navigation.js", feature: "API-key 首页会话恢复" },
+  { script: "patch-home-restore-diagnostics.js", feature: "首页恢复诊断日志（临时）" },
   { script: "patch-thread-timeline.js", feature: "按版本能力启用官方会话时间线" },
   { script: "patch-mcp-status-refresh.js", feature: "MCP 启动状态刷新治理" },
   { script: "patch-accent-presets.js", feature: "API-key 本地强调色预设" },
