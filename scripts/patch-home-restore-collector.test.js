@@ -42,6 +42,28 @@ test('collector patches actual main-process listener and forwards both Electron 
   );
 });
 
+test('collector also accepts a webContents payload', () => {
+  const patched = patchSource(fixture());
+  const tick = String.fromCharCode(96);
+  const first = 'O.default.app.on(' + tick + 'browser-window-created' + tick + ',a),';
+  const start = patched.source.indexOf(first) + first.length;
+  const end = patched.source.indexOf(',n.push(', start);
+  let appHandler;
+  let messageHandler;
+  let written;
+  const fs = { appendFileSync: (_file, data) => { written = data; } };
+  const app = { on: (_event, callback) => { appHandler = callback; } };
+  const webContents = {
+    isDestroyed: () => false,
+    on: (_event, callback) => { messageHandler = callback; },
+  };
+  vm.runInNewContext(patched.source.slice(start, end), { O: { default: { app } }, app, fs });
+  appHandler({}, webContents);
+  assert.equal(typeof messageHandler, 'function');
+  messageHandler('legacy', 3, 'DIAG __codexHomeRestoreDiag payload');
+  assert.equal(written, '__codexHomeRestoreDiag payload\n');
+});
+
 test('collector needs the evaluated main-process window listener', () => {
   assert.equal(patchSource('unrelated').status, 'not-applicable');
   assert.equal(patchSource('browser-window-created O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',a),').status, 'unexpected-shape');

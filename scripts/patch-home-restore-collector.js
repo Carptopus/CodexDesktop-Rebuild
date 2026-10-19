@@ -8,11 +8,16 @@ const PLATFORMS = ['mac-arm64', 'mac-x64', 'win'];
 const ANCHOR = 'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',a),';
 const COLLECTOR = [
   'O.default.app.on(' + String.fromCharCode(96) + 'browser-window-created' + String.fromCharCode(96) + ',(ce,we)=>{try{',
-  'we.webContents.on(' + String.fromCharCode(96) + 'console-message' + String.fromCharCode(96) + ',(Ee,Se,Ie)=>{try{',
+  'const webContents=we?.webContents??we;',
+  'if(webContents?.isDestroyed?.())return;',
+  'const hookMessage=(Ee,Se,Ie)=>{try{',
   'const De=[Ee?.message,Se?.message,typeof Se===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Se:null,Ie?.message,typeof Ie===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '?Ie:null].find(xe=>typeof xe===' + String.fromCharCode(39) + 'string' + String.fromCharCode(39) + '&&xe.includes(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
   'if(De!=null){const xe=De.slice(De.indexOf(' + String.fromCharCode(39) + '__codexHomeRestoreDiag' + String.fromCharCode(39) + '));',
   'fs.appendFileSync(' + String.fromCharCode(39) + 'Z:\\TEMP\\CodexRebuild\\cache\\home-restore-diag.jsonl' + String.fromCharCode(39) + ',xe+' + String.fromCharCode(39) + '\\n' + String.fromCharCode(39) + ')}',
-  '}catch(xe){}})}catch(xe){}}),',
+  '}catch(xe){}};',
+  'webContents?.on?.(' + String.fromCharCode(96) + 'console-message' + String.fromCharCode(96) + ',hookMessage);',
+  'if(webContents?.isDestroyed?.())return;',
+  '}catch(xe){}}),',
 ].join('');
 
 function patchSource(source) {
