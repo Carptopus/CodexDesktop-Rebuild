@@ -19,7 +19,9 @@ function targetDirectories(platform) {
 }
 function stmt(tag, expression) { return '(window.' + PREFIX + '??=[]).push({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '});' }
 function logCall(tag, expression) {
-  return '(window.' + PREFIX + '??=[]).push({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '}),';
+  const entry = '({tag:' + JSON.stringify(tag) + ',at:Date.now(),data:' + expression + '})';
+  const report = JSON.stringify('DIAG ' + tag + ' ' + expression);
+  return '(window.' + PREFIX + '??=[]).push(' + entry + '),console.log(' + report + '),';
 }
 function patchSource(source) {
   if (source.includes(MARKER)) return { status: 'already-patched', source };
