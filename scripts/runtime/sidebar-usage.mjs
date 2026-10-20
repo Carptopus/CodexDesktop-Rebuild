@@ -27,20 +27,22 @@ export function renderSidebarUsage({ compact, auth, usage, intl, jsx }) {
   const size = compact ? 32 : 24;
   return jsx.jsxs("span", {
     "data-codex-sidebar-usage": true, role: "img", "aria-label": `${label}: ${percent}`, title,
-    style: { position: "relative", display: "inline-flex", width: size, height: size, flexShrink: 0, alignItems: "center", justifyContent: "center" },
+    style: { display: "inline-flex", width: size, height: size, flexShrink: 0, alignItems: "center", justifyContent: "center", color: "var(--color-text)", lineHeight: 0 },
     children: [jsx.jsxs("svg", {
-      width: size, height: size, viewBox: "0 0 36 36", "aria-hidden": true,
-      style: { position: "absolute", inset: 0, overflow: "visible" },
+      width: size, height: size, viewBox: "0 0 36 36", "aria-hidden": true, "data-no-autosize": true,
+      // 官方按钮会自动缩放内部 SVG；使用其原生豁免，并把数字置于同一坐标系。
+      style: { display: "block", width: size, height: size, flex: "none", margin: 0, overflow: "visible" },
       children: [jsx.jsx("circle", {
-        cx: 18, cy: 18, r: 15, fill: "none", stroke: "currentColor", strokeWidth: 2.5, opacity: 0.14,
+        cx: 18, cy: 18, r: 15, fill: "none", stroke: "currentColor", strokeWidth: 2.5, opacity: 0.2,
       }), remaining == null ? null : jsx.jsx("circle", {
         cx: 18, cy: 18, r: 15, fill: "none", stroke: color, strokeWidth: 2.5,
         pathLength: 100, strokeDasharray: `${remaining} 100`, transform: "rotate(-90 18 18)",
+      }), jsx.jsx("text", {
+        "data-codex-sidebar-usage-value": true, x: 18, y: 18, textAnchor: "middle", dominantBaseline: "central",
+        textLength: percent.length >= 4 ? 26 : undefined, lengthAdjust: "spacingAndGlyphs",
+        style: { fill: "var(--color-text)", opacity: 1, fontSize: compact ? 13 : 15, fontWeight: 700, fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
+        children: percent,
       })],
-    }), jsx.jsx("span", {
-      "data-codex-sidebar-usage-value": true,
-      style: { position: "relative", fontSize: compact ? 9 : 7.5, fontWeight: 600, fontVariantNumeric: "tabular-nums", lineHeight: 1 },
-      children: percent,
     })],
   });
 }

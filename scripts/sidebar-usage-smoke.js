@@ -28,6 +28,7 @@ function Profile(input){
 async function main() {
   const args = process.argv.slice(2);
   let source = fixture, rendererPath = path.join(__dirname, "runtime/sidebar-usage.mjs"), origin = "内置功能样本";
+  let rendererUrl = pathToFileURL(rendererPath).href;
   if (args[0] === "--asar" && args.length === 2) {
     const asar = await import("@electron/asar");
     const files = asar.listPackage(args[1]);
@@ -36,7 +37,9 @@ async function main() {
     origin = `${args[1]}:${entry}`;
     if (source.includes(MARKER)) {
       const embedded = asar.extractFile(args[1], path.join(path.dirname(entry), MODULE).replace(/^[/\\]/, "")).toString();
-      assert.equal(embedded, fs.readFileSync(rendererPath, "utf8"), "候选渲染模块与当前源码不一致");
+      // Git 在 Windows 构建机可能检出 CRLF；校验源码内容后直接执行成品模块。
+      assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"), "候选渲染模块与当前源码不一致");
+      rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
     }
   } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--asar PATH]");
   const result = patchSource(source);
@@ -54,7 +57,7 @@ async function main() {
   const atom = {}, fallback = { type: "native-avatar", props: {} }, state = {};
   const jsx = { jsx: (type, props) => typeof type === "function" ? type(props) : { type, props } };
   jsx.jsxs = jsx.jsx;
-  const { renderSidebarUsage } = await import(pathToFileURL(rendererPath));
+  const { renderSidebarUsage } = await import(rendererUrl);
   const context = {
     [authHook]: () => state.auth,
     [readHook]: value => { assert.equal(value, atom); state.reads++; return { data: state.usage }; },
@@ -102,6 +105,18 @@ async function main() {
   assert.equal(all(tree).filter(node => node.type === "button").length, 0, "不能在原按钮里嵌套新按钮");
   const ring = all(tree).find(node => node.type === "circle" && node.props.pathLength === 100);
   assert.equal(ring.props.strokeDasharray, "81 100");
+  const svg = all(tree).find(node => node.type === "svg");
+  assert.equal(svg.props["data-no-autosize"], true, "必须避开官方按钮 SVG 自动缩放");
+  assert.equal(svg.props.style.width, tree.props.style.width);
+  assert.equal(svg.props.style.height, tree.props.style.height);
+  const percentage = all(svg).find(node => node.props?.["data-codex-sidebar-usage-value"]);
+  assert.equal(percentage.type, "text", "数字和圆环必须共用 SVG 坐标系");
+  assert.equal(percentage.props.x, ring.props.cx);
+  assert.equal(percentage.props.y, ring.props.cy);
+  assert.equal(percentage.props.textAnchor, "middle");
+  assert.equal(percentage.props.dominantBaseline, "central");
+  assert.equal(percentage.props.style.fill, "var(--color-text)");
+  assert.ok(percentage.props.style.fontSize >= 13);
   assert.match(tree.props.title, /每周: 81%/);
   for (const node of nodes(nativeButton.arguments[1], node => node.type === "Identifier")) {
     if (!(node.name in context)) context[node.name] = null;
