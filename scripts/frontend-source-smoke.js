@@ -143,6 +143,10 @@ function verifyFrontendSource(assets) {
   const shared = files.filter(name => /^app-shared-/.test(name) && fs.readFileSync(path.join(assets, name), "utf8").includes("codex-rebuild-dialog-default"));
   assert.equal(shared.length, 1);
   const dialogs = fs.readFileSync(path.join(assets, shared[0]), "utf8");
+  const inviteMenus = files.filter(name => /^profile-dropdown-items-.*\.js$/.test(name));
+  assert.equal(inviteMenus.length, 1);
+  assert.equal(require("./patch-hide-invite-menu").patchSource(
+    fs.readFileSync(path.join(assets, inviteMenus[0]), "utf8")).status, "already-patched");
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
   return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, remoteControlAuthIsolated: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }

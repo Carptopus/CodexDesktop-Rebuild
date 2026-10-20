@@ -147,12 +147,32 @@ try {
   const missingRequiredRoot = path.join(temporary, "missing-required-targets");
   fs.mkdirSync(path.join(missingRequiredRoot, "win", "_asar", "webview", "assets"), { recursive: true });
   run("patch-hide-pet-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+  run("patch-hide-invite-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   run("patch-model-picker-submenu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   fs.writeFileSync(
     path.join(missingRequiredRoot, "win", "_asar", "webview", "assets", "archived-list.js"),
     "client.sendRequest(`thread/list`,{archived:!0,modelProviders:null});",
   );
   run("patch-archive-delete.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+
+  const inviteRoot = path.join(temporary, "invite-menu");
+  const inviteFile = path.join(inviteRoot, "win", "_asar", "webview", "assets", "profile-dropdown-items-fixture.js");
+  const inviteSource = 'function Invite(){return {id:`codex.profileDropdown.inviteFriend`,other:`codex.profileDropdown.inviteCoworker`}};function menu(){return [ui.jsx(Invite,{context:context,onSelect:close}),usage,settings,help]};';
+  write(inviteFile, inviteSource);
+  const inviteEnv = { CODEX_PATCH_SOURCE_DIR: inviteRoot };
+  run("patch-hide-invite-menu.js", ["win", "--check"], 0, inviteEnv);
+  assert.equal(fs.readFileSync(inviteFile, "utf8"), inviteSource);
+  run("patch-hide-invite-menu.js", ["win"], 0, inviteEnv);
+  const hiddenInvite = fs.readFileSync(inviteFile, "utf8");
+  const renderMenu = source => Function("ui", "context", "close", "usage", "settings", "help", source + "return menu();")(
+    { jsx: () => "invite" }, {}, () => {}, "usage", "settings", "help");
+  assert.deepEqual(renderMenu(inviteSource), ["invite", "usage", "settings", "help"]);
+  assert.deepEqual(renderMenu(hiddenInvite), [null, "usage", "settings", "help"]);
+  run("patch-hide-invite-menu.js", ["win"], 0, inviteEnv);
+  assert.equal(fs.readFileSync(inviteFile, "utf8"), hiddenInvite);
+  write(inviteFile, inviteSource.replace("onSelect:close", "changed:close"));
+  run("patch-hide-invite-menu.js", ["win"], 1, inviteEnv);
+  assert.equal(fs.readFileSync(inviteFile, "utf8"), inviteSource.replace("onSelect:close", "changed:close"));
 
   const pickerRoot = path.join(temporary, "picker");
   const pickerFile = path.join(pickerRoot, "win", "_asar", "webview", "assets", "model-picker.js");
