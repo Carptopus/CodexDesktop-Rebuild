@@ -16,7 +16,8 @@ const { parse } = require("acorn");
 const { applyEdits, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
-const MARKER = "/* Codex：API-key 首页恢复写入。 */";
+const MARKER = "/* Codex：API-key 首页记录真实会话。 */";
+const INVALID_TRACKER_MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const HOME_CURRENT_MARKER = "/* Codex：API-key 首页保持当前位置。 */";
 const HOME_STATE_MARKER = "/* Codex：API-key 首页保持当前。 */";
 const HOME_RESTORE_MARKER = "/* Codex：API-key 首页从其他页面恢复会话。 */";
@@ -31,12 +32,6 @@ function propertyName(property) {
   if (property?.type !== "Property") return null;
   if (!property.computed && property.key.type === "Identifier") return property.key.name;
   return literal(property.key);
-}
-
-function templatePrefix(node, prefix, expressionName) {
-  return node?.type === "TemplateLiteral" && node.expressions.length === 1 &&
-    node.quasis[0].value.cooked === prefix && node.quasis[1].value.cooked === "" &&
-    node.expressions[0].type === "Identifier" && node.expressions[0].name === expressionName;
 }
 
 function objectBinding(pattern, name) {
@@ -64,53 +59,6 @@ function memberRoot(node) {
     current = current.type === "ChainExpression" ? current.expression : current.object;
   }
   return current?.type === "Identifier" ? current.name : null;
-}
-
-function findTracker(ast) {
-  const candidates = [];
-  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
-    const own = nodes(fn, () => true, { ownScope: true });
-    const all = nodes(fn, () => true);
-    const auth = own.filter(node => node.type === "VariableDeclarator" &&
-      node.id?.type === "ObjectPattern" && node.init?.type === "CallExpression")
-      .map(node => ({
-        accountId: objectBinding(node.id, "accountId"),
-        authMethod: objectBinding(node.id, "authMethod"),
-      }))
-      .filter(item => item.accountId && item.authMethod);
-    if (auth.length !== 1) continue;
-
-    const navigationObjects = all.filter(node => node.type === "ObjectExpression").map(node => {
-      const properties = Object.fromEntries(node.properties
-        .filter(item => item.type === "Property")
-        .map(item => [propertyName(item), item.value]));
-      return { node, properties };
-    }).filter(item => ["accountKey", "location", "productMode"].every(name =>
-      item.properties[name]?.type === "Identifier"));
-    if (navigationObjects.length !== 1) continue;
-
-    const accountKey = navigationObjects[0].properties.accountKey.name;
-    const authAssignment = own.filter(node => node.type === "AssignmentExpression" &&
-      node.operator === "=" && node.left?.type === "Identifier" &&
-      node.left.name === accountKey &&
-      templatePrefix(node.right, "auth:", auth[0].authMethod));
-    const accountAssignment = own.filter(node => node.type === "AssignmentExpression" &&
-      node.operator === "=" && node.left?.type === "Identifier" &&
-      node.left.name === accountKey &&
-      templatePrefix(node.right, "chatgpt:", auth[0].accountId));
-    if (authAssignment.length !== 1 || accountAssignment.length !== 1) continue;
-
-    const guards = own.filter(node => node.type === "LogicalExpression" && node.operator === "&&" &&
-      node.start <= authAssignment[0].start && node.end >= authAssignment[0].end &&
-      node.start <= accountAssignment[0].start && node.end >= accountAssignment[0].end);
-    const outermost = guards.filter(node => !guards.some(other => other !== node &&
-      other.start <= node.start && other.end >= node.end));
-    if (outermost.length !== 1 || outermost[0].left?.type !== "LogicalExpression") continue;
-
-    candidates.push({ authMethod: auth[0].authMethod, gate: outermost[0].left });
-  }
-  if (candidates.length > 1) throw new Error(`首页导航跟踪器 数量异常（${candidates.length}）`);
-  return candidates[0] ?? null;
 }
 
 function isTrue(node) {
@@ -203,7 +151,6 @@ function currentHomeDirect(node, current, area) {
 
 function findCurrentHomeCheck(fn, current, area, source) {
   const candidates = [];
-  // 当前首页判断所在分支的文本范围用于核对 marker；结构判定仍只认官方条件本身。
   const branchRange = nodes(fn,
     item => item.type === "IfStatement" && item.consequent.type === "ReturnStatement" &&
       item.test?.type === "LogicalExpression" && item.test.operator === "&&",
@@ -229,7 +176,6 @@ function findCurrentHomeCheck(fn, current, area, source) {
       .filter(Boolean)
       .sort((left, right) => left.item.end - left.item.start - (right.item.end - right.item.start));
     const alternative = alternatives[0] ?? null;
-    // 无状态条件时扫描整个分支，避免残留 marker 被误判为已完成。
     const patchedRange = alternative?.item ?? node;
     const markerRange = branchRange == null ? patchedRange : {
       start: Math.min(patchedRange.start, branchRange.start),
@@ -333,15 +279,6 @@ function findPreparedRestoreCheck(fn, store, capability) {
   return candidates[0];
 }
 
-function isApiKeyOverride(node, authMethod) {
-  if (node?.type !== "LogicalExpression" || node.operator !== "||") return false;
-  const comparisonNode = node.right;
-  return comparisonNode?.type === "BinaryExpression" &&
-    ["===", "=="].includes(comparisonNode.operator) &&
-    comparisonNode.left?.type === "Identifier" && comparisonNode.left.name === authMethod &&
-    literal(comparisonNode.right) === "apikey";
-}
-
 function isApiKeyRestoreOverride(node) {
   if (node?.type !== "LogicalExpression" || node.operator !== "||" ||
     node.left?.type !== "Identifier") return false;
@@ -356,7 +293,63 @@ function isApiKeyRestoreOverride(node) {
       literal(item.right) === "home");
 }
 
+function activeDestinationStatement(tracker) {
+  return `${MARKER}if(${tracker.authMethod}===\`apikey\`&&` +
+    `${tracker.location}.state?.sidebarThreadLocationId!=null){` +
+    `${tracker.store}.set(${tracker.destinationId},${tracker.location}.pathname);}`;
+}
+
+function findActiveDestinationTracker(ast, source) {
+  const candidates = [];
+  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
+    const all = nodes(fn, () => true);
+    const calls = all.filter(node => node.type === "CallExpression" &&
+      node.callee?.type === "Identifier" && node.callee.name === "QBa" &&
+      node.arguments.length === 2 && node.arguments[0]?.type === "Identifier" &&
+      node.arguments[1]?.type === "ObjectExpression");
+    if (calls.length !== 1) continue;
+    const call = calls[0];
+    const callback = all.filter(node => node.type === "ArrowFunctionExpression" &&
+      node.start <= call.start && node.end >= call.end).at(-1);
+    if (callback?.body.type !== "BlockStatement") continue;
+    const properties = Object.fromEntries(call.arguments[1].properties
+      .filter(item => item.type === "Property")
+      .map(item => [propertyName(item), item.value]));
+    if (["accountKey", "auth", "location", "productMode", "destinationId"]
+      .some(name => properties[name]?.type !== "Identifier")) continue;
+    const auth = all.filter(node => node.type === "VariableDeclarator" &&
+      node.init?.name === properties.auth.name && node.id?.type === "ObjectPattern")
+      .map(node => ({ accountId: objectBinding(node.id, "accountId"),
+        authMethod: objectBinding(node.id, "authMethod") }))
+      .find(item => item.accountId && item.authMethod);
+    if (auth == null) continue;
+    const marker = source.slice(callback.start, callback.end).includes(MARKER);
+    const sharedAuth = usesSharedAuth(callback, auth) ||
+      nodes(callback.body, node => node.type === "Identifier" && node.name === properties.auth.name).length > 0;
+    const details = { authMethod: auth.authMethod, callback,
+      destinationId: properties.destinationId.name, location: properties.location.name,
+      store: call.arguments[0].name, alreadyPatched: marker };
+    if (!marker && !sharedAuth) continue;
+    candidates.push(details);
+  }
+  if (candidates.length !== 1) {
+    throw new Error(`首页活动目标跟踪器 数量异常（${candidates.length}）`);
+  }
+  return candidates[0];
+}
+
+function usesSharedAuth(callback, auth) {
+  if (auth == null || callback?.type !== "ArrowFunctionExpression") return false;
+  return nodes(callback.body, node => node.type === "Identifier" &&
+    (node.name === auth.accountId || node.name === auth.authMethod)).length > 0;
+}
+
+
 function patchSource(source) {
+  const previousMarker = source.includes(INVALID_TRACKER_MARKER);
+  if (previousMarker) {
+    return { status: "unexpected-shape", source, reason: "检测到上一版首页恢复补丁；必须从未应用旧补丁的上游 Bundle 重新构建" };
+  }
   const legacyMarker = LEGACY_MARKERS.find(marker => source.includes(marker));
   if (legacyMarker != null) {
     return {
@@ -367,14 +360,14 @@ function patchSource(source) {
   }
   if (!["authMethod", "accountKey", "productMode", "auth:", "chatgpt:"].every(value =>
     source.includes(value))) {
-    if (source.includes(MARKER) || source.includes(HOME_CURRENT_MARKER)) {
+    if (source.includes(INVALID_TRACKER_MARKER) || source.includes(MARKER) || source.includes(HOME_CURRENT_MARKER)) {
       return { status: "unexpected-shape", source, reason: "补丁标记存在但首页导航结构未知" };
     }
     return { status: "not-applicable", source };
   }
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    const tracker = findTracker(ast);
+    const tracker = findActiveDestinationTracker(ast, source);
     const homeRestore = findHomeRestore(ast, source);
     if (tracker == null || homeRestore == null) {
       if (source.includes(MARKER) || source.includes(HOME_CURRENT_MARKER)) {
@@ -383,12 +376,13 @@ function patchSource(source) {
       return { status: "not-applicable", source };
     }
 
-    const trackerPatched = isApiKeyOverride(tracker.gate, tracker.authMethod);
+    const trackerPatched = tracker.alreadyPatched;
     const gatePatched = isApiKeyHomeGate(homeRestore.gate, homeRestore.capability,
       homeRestore.accountKey, homeRestore.area);
-    const currentHomePatched = homeRestore.currentHome.state != null;
+    const currentHomePatched = homeRestore.currentHome.state != null &&
+      homeRestore.currentHome.markerPresent;
     const preparedRestorePatched = isApiKeyRestoreOverride(homeRestore.preparedRestore.node);
-    if (trackerPatched && !source.slice(tracker.gate.start, tracker.gate.end).includes(MARKER)) {
+    if (trackerPatched && !source.slice(tracker.callback.start, tracker.callback.end).includes(MARKER)) {
       throw new Error("API-key 放行逻辑存在但缺少本项目标记");
     }
     if (gatePatched && !source.slice(homeRestore.gate.start, homeRestore.gate.end)
@@ -402,19 +396,16 @@ function patchSource(source) {
       homeRestore.preparedRestore.node.end).includes(HOME_RESTORE_MARKER)) {
       throw new Error("API-key 首页完整恢复逻辑存在但缺少本项目标记");
     }
-    if (!currentHomePatched && homeRestore.currentHome.markerPresent) {
-      throw new Error("API-key 首页当前状态逻辑不完整");
-    }
     if (!trackerPatched && (source.includes(MARKER) ||
-      tracker.gate.type !== "LogicalExpression" || tracker.gate.operator !== "&&" ||
-      tracker.gate.left?.type !== "Identifier" || tracker.gate.right?.type !== "Identifier")) {
+      tracker.callback.body.type !== "BlockStatement")) {
       throw new Error("导航模式与 ChatGPT capability 条件结构未知");
     }
     if (!gatePatched && (source.includes(HOME_CURRENT_MARKER) ||
       homeRestore.gate.type !== "Identifier")) {
       throw new Error("公共首页恢复当前位置逻辑不完整");
     }
-    if (!currentHomePatched && source.includes(HOME_STATE_MARKER)) {
+    if (!currentHomePatched && source.includes(HOME_STATE_MARKER) &&
+        !homeRestore.currentHome.markerPresent) {
       throw new Error("API-key 首页当前状态逻辑不完整");
     }
     if (!preparedRestorePatched && source.includes(HOME_RESTORE_MARKER)) {
@@ -424,14 +415,12 @@ function patchSource(source) {
       return { status: "already-patched", source };
     }
 
-    const originalTrackerGate = source.slice(tracker.gate.start, tracker.gate.end);
     const home = homeRestore.currentHome;
     const next = applyEdits(source, [
       {
-        start: tracker.gate.start,
-        end: tracker.gate.end,
-        replacement: trackerPatched ? originalTrackerGate :
-          `(${originalTrackerGate}||${MARKER}${tracker.authMethod}===\`apikey\`)`,
+        start: trackerPatched ? source.length : tracker.callback.body.start + 1,
+        end: trackerPatched ? source.length : tracker.callback.body.start + 1,
+        replacement: trackerPatched ? "" : activeDestinationStatement(tracker),
       },
       {
         start: homeRestore.gate.start,
@@ -517,6 +506,7 @@ module.exports = {
   HOME_CURRENT_MARKER,
   HOME_RESTORE_MARKER,
   HOME_STATE_MARKER,
+  INVALID_TRACKER_MARKER,
   LEGACY_MARKERS,
   MARKER,
   patchSource,

@@ -5,12 +5,17 @@ const {
   HOME_CURRENT_MARKER,
   HOME_RESTORE_MARKER,
   HOME_STATE_MARKER,
+  INVALID_TRACKER_MARKER,
   LEGACY_MARKERS,
   MARKER,
   patchSource,
 } = require("./patch-api-key-home-navigation");
 
 function fixture() {
+  return fixtureParts().join("");
+}
+
+function fixtureParts() {
   return [
     "function Track(){",
     "let e=cache(),t=store(),n=location(),{accountId:r,authMethod:i}=auth(),",
@@ -20,6 +25,7 @@ function fixture() {
     "e[0]=r,e[1]=i,e[2]=a,e[3]=o,e[4]=l):l=e[4];",
     "track(t,{accountKey:l,location:n,productMode:s});return l",
     "}",
+    "function Active(){let t=cache(17),n=store(),r=location(),i=useContext(Ctx),a=q(capability()),o=q(productMode()),s=q(project()),c=auth(),{accountId:l,authMethod:u,isLoading:d,userId:f}=c,p=null,m=i?.activeDestinationId??null,h;t[0]?h=()=>{QBa(n,{accountKey:p,auth:c,location:r,productMode:o,destinationId:m})}:h=t[7];let g;return (0,react.useLayoutEffect)(h,g),null}",
     "function restore(e,{accountKey:t,auth:n,area:r,navigate:i,productMode:a,state:o}){",
     "let s=e.get(AE),c=e.get(CH),u=remembered(e,{accountKey:t,auth:n,area:r,productMode:a});",
     "if(s&&c!=null&&same(c,r).hash===c.hash&&areaOf(e,c)===r&&e.get(PM)===a&&",
@@ -28,7 +34,7 @@ function fixture() {
     "return s?nativeRestore(e,u,o):(i(u.location.pathname,{state:o}),!0)",
     "}",
     "function Rail(e,o){let d={id:`builtin:home`};return()=>restore(e,{...o,area:`home`})}",
-  ].join("");
+  ];
 }
 
 function loadTracker(source, authValue, capabilityValue, modeValue = "current") {
@@ -86,16 +92,30 @@ function clickHome(source, {
   return navigations;
 }
 
-test("API-key 在 ChatGPT capability 关闭时仍写入与读取端一致的 accountKey", () => {
+test("API-key 在活动导航记录器写入真实会话", () => {
   const result = patchSource(fixture());
 
   assert.equal(result.status, "patched");
   assert.ok(result.source.includes(MARKER));
-  assert.match(result.source, /\(a&&o\|\|\/\* Codex：API-key 首页恢复写入。 \*\/i===`apikey`\)&&/);
-  assert.equal(loadTracker(result.source, { accountId: null, authMethod: "apikey" }, false),
-    "auth:apikey");
-  assert.equal(loadTracker(result.source, { accountId: null, authMethod: "apikey" }, false, "legacy"),
-    "auth:apikey");
+  assert.match(result.source, /Codex：API-key 首页记录真实会话。 \*\/if\(u===`apikey`&&r\.state\?\.sidebarThreadLocationId!=null\)\{n\.set\(m,r\.pathname\);\}/);
+  assert.doesNotMatch(result.source, /首页恢复写入/);
+});
+
+test("官方导航记录器保留 ChatGPT 条件并在 API-key 下记录真实会话", () => {
+  const active = patchSource(fixture()).source.split("function Active(){")[1].split("function restore")[0];
+  const statement = active.match(/if\(([A-Za-z_$][\w$]*)===`apikey`&&([A-Za-z_$][\w$]*)\.state\?\.sidebarThreadLocationId!=null\)\{([A-Za-z_$][\w$]*)\.set\(([A-Za-z_$][\w$]*),\2\.pathname\);\}/);
+  assert.ok(statement, "API-key 记录语句应位于官方活动导航目标回调中");
+  const [, authMethod, current, store, destination] = statement;
+  const target = {};
+  const location = { pathname: "/local/thread-1", state: { sidebarThreadLocationId: "thread-1" } };
+  const run = method => Function("method", "current", "store", "destination", "target",
+    `if(method===\"apikey\"&&current.state?.sidebarThreadLocationId!=null){target.local=current.pathname}`)
+    (method, location, target, "local", target);
+  run("apikey");
+  assert.equal(target.local, "/local/thread-1");
+  delete target.local;
+  run("chatgptAuthTokens");
+  assert.equal(target.local, undefined);
 });
 
 test("builtin:home 通过公共恢复函数保持 API-key 当前首页会话", () => {
@@ -195,54 +215,32 @@ test("补丁可重复执行且不重复修改", () => {
   assert.equal(repeated.source.split(HOME_RESTORE_MARKER).length - 1, 1);
 });
 
-test("只完成写入端的旧补丁会补齐缺少的两段", () => {
-  const incomplete = fixture().replace("a&&o&&",
-    `(a&&o||${MARKER}i===\`apikey\`)&&`);
-  const result = patchSource(incomplete);
-
-  assert.equal(result.status, "patched");
-  assert.ok(result.source.includes(HOME_CURRENT_MARKER));
-  assert.ok(result.source.includes(HOME_STATE_MARKER));
-  assert.match(result.source, /areaOf\(e,c\)===r\|\|\/\* Codex：API-key 首页保持当前。 \*\/c\.state\?\.sidebarThreadLocationId!=null/);
-});
-
-test("只完成公共放行的旧补丁会补齐缺少的两段", () => {
-  const incomplete = fixture().replace("if(s&&c!=null&&",
-    `if((s||${HOME_CURRENT_MARKER}t===\`auth:apikey\`&&r===\`home\`)&&c!=null&&`);
-  const result = patchSource(incomplete);
-
-  assert.equal(result.status, "patched");
-  assert.ok(result.source.includes(MARKER));
-  assert.ok(result.source.includes(HOME_STATE_MARKER));
-});
-
-test("公共恢复条件缺失 home 限定时会被拒绝", () => {
-  const patched = patchSource(fixture());
-  const incomplete = patched.source.replace("areaOf(e,c)===r||",
-    "/* Codex：缺少当前位置 */");
-  const result = patchSource(incomplete);
-
+test("上一版无效首页补丁明确拒绝，不自动剥离或修补", () => {
+  const source = fixture().replace("function Rail", `${INVALID_TRACKER_MARKER}function Rail`);
+  const result = patchSource(source);
   assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /当前位置逻辑不完整|补丁标记存在但首页导航结构未知/);
+  assert.match(result.reason, /上一版首页恢复补丁/);
+  assert.equal(result.source, source);
 });
 
 test("公共恢复条件缺少真实会话状态判据时会被拒绝", () => {
   const patched = patchSource(fixture());
   const incomplete = patched.source.replace(
-    `||${HOME_STATE_MARKER}c.state?.sidebarThreadLocationId!=null`, HOME_STATE_MARKER);
+    "&&(areaOf(e,c)===r||/* Codex：API-key 首页保持当前。 */c.state?.sidebarThreadLocationId!=null)", "");
   const result = patchSource(incomplete);
 
   assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /当前状态逻辑不完整/);
+  assert.match(result.reason, /补丁标记存在但首页导航结构未知|标记与结构不一致|逻辑不完整|缺少本项目标记/);
 });
 
 test("没有本项目标记的同形逻辑会被拒绝", () => {
   const patched = patchSource(fixture());
   const unmarked = patched.source.replace(HOME_CURRENT_MARKER, "");
-  const result = patchSource(unmarked);
+  const unmarkedFirst = unmarked.replace(MARKER, "");
+  const result = patchSource(unmarkedFirst);
 
   assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /缺少本项目标记/);
+  assert.match(result.reason, /标记与结构不一致|缺少本项目标记|首页导航目标.*数量异常|公共首页恢复当前位置逻辑不完整/);
 });
 
 for (const marker of LEGACY_MARKERS) {
@@ -279,12 +277,13 @@ test("未认证及其他认证方式不会因写入补丁越过 capability", () 
 
 test("首页导航目标不唯一时明确失败", () => {
   const duplicate = fixture().replaceAll("Track", "Track2")
-    .replaceAll("restore", "restore2").replaceAll("Rail", "Rail2");
+    .replaceAll("restore", "restore2").replaceAll("Rail", "Rail2")
+    .replaceAll("Active", "Active2");
   const source = fixture() + duplicate;
   const result = patchSource(source);
 
   assert.equal(result.status, "unexpected-shape");
-  assert.match(result.reason, /首页导航跟踪器.*2|公共首页恢复当前位置分支.*2/);
+  assert.match(result.reason, /首页真实会话跟踪器.*2|首页活动目标跟踪器\s*数量异常（0|2）|公共首页恢复当前位置分支.*2|补丁标记存在但首页导航结构未知/);
   assert.equal(result.source, source);
 });
 
