@@ -148,6 +148,8 @@ try {
   fs.mkdirSync(path.join(missingRequiredRoot, "win", "_asar", "webview", "assets"), { recursive: true });
   run("patch-hide-pet-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   run("patch-hide-invite-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+  run("patch-sidebar-usage.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
+  run("sidebar-usage-smoke.js", []);
   run("patch-model-picker-submenu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   fs.writeFileSync(
     path.join(missingRequiredRoot, "win", "_asar", "webview", "assets", "archived-list.js"),

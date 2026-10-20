@@ -28,6 +28,7 @@
     "test": "node --test scripts/*.test.js",
     "check": "node scripts/check-scripts.js",
     "test:maintenance": "node scripts/maintenance-smoke.js",
+    "test:sidebar-usage": "node scripts/sidebar-usage-smoke.js",
     "windows:check-update": "node scripts/windows-maintenance.js discover",
     "windows:candidate": "node scripts/windows-maintenance.js candidate",
     "windows:verify-release": "node scripts/windows-maintenance.js verify-release",

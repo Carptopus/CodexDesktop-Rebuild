@@ -27,6 +27,7 @@ const PATCH_POLICY = [
   { script: "patch-accent-presets.js", feature: "API-key 本地强调色预设" },
   { script: "patch-hide-pet-menu.js", feature: "隐藏 Pet 菜单入口" },
   { script: "patch-hide-invite-menu.js", feature: "隐藏账户菜单邀请入口" },
+  { script: "patch-sidebar-usage.js", feature: "侧栏常驻剩余额度圆环" },
   { script: "patch-reading-layout.js", feature: "可配置正文宽度与排版" },
   { script: "patch-model-catalog-filter.js", feature: "模型目录过滤" },
   { script: "patch-model-picker-submenu.js", feature: "模型选择器子菜单" },

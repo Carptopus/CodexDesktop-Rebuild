@@ -147,6 +147,10 @@ function verifyFrontendSource(assets) {
   assert.equal(inviteMenus.length, 1);
   assert.equal(require("./patch-hide-invite-menu").patchSource(
     fs.readFileSync(path.join(assets, inviteMenus[0]), "utf8")).status, "already-patched");
+  const usagePatch = require("./patch-sidebar-usage");
+  assert.equal(usagePatch.patchSource(mcpRefreshSource).status, "already-patched");
+  assert.equal(fs.readFileSync(path.join(assets, usagePatch.MODULE), "utf8"),
+    fs.readFileSync(path.join(__dirname, "runtime", "sidebar-usage.mjs"), "utf8"));
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
   return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, remoteControlAuthIsolated: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
