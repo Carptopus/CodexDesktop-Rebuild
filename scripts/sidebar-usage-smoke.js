@@ -100,11 +100,17 @@ async function main() {
   } });
   state.auth = baseAuth; state.usage = usage(19); state.locale = "zh-CN";
   let tree = render();
-  assert.equal(value(tree), "81%"); assert.equal(state.reads, 1);
+  assert.equal(value(tree), "81"); assert.equal(state.reads, 1);
+  assert.equal(tree.props["aria-label"], "剩余额度: 81%");
   assert.equal(tree.type, "span"); assert.equal(tree.props.style.width, 32);
   assert.equal(all(tree).filter(node => node.type === "button").length, 0, "不能在原按钮里嵌套新按钮");
   const ring = all(tree).find(node => node.type === "circle" && node.props.pathLength === 100);
   assert.equal(ring.props.strokeDasharray, "81 100");
+  assert.equal(ring.props.strokeWidth, 2);
+  assert.match(ring.props.stroke, /^color-mix\(/);
+  const track = all(tree).find(node => node.type === "circle" && node.props.pathLength == null);
+  assert.equal(track.props.strokeWidth, 2);
+  assert.equal(track.props.opacity, 0.1);
   const svg = all(tree).find(node => node.type === "svg");
   assert.equal(svg.props["data-no-autosize"], true, "必须避开官方按钮 SVG 自动缩放");
   assert.equal(svg.props.style.width, tree.props.style.width);
@@ -116,6 +122,7 @@ async function main() {
   assert.equal(percentage.props.textAnchor, "middle");
   assert.equal(percentage.props.dominantBaseline, "central");
   assert.equal(percentage.props.style.fill, "var(--color-text)");
+  assert.equal(percentage.props.style.fontWeight, 500);
   assert.ok(percentage.props.style.fontSize >= 13);
   assert.match(tree.props.title, /每周: 81%/);
   for (const node of nodes(nativeButton.arguments[1], node => node.type === "Identifier")) {
@@ -127,18 +134,21 @@ async function main() {
   const button = vm.runInContext(result.source.slice(nativeButton.start, nativeButton.end), context, { timeout: 2000 });
   assert.equal(button.props.children[1], tree);
   button.props.onClick(); assert.equal(state.menuOpened, true, "点击仍走原生账户菜单事件");
-  state.usage = usage(28); assert.equal(value(render()), "72%", "不打开菜单也应读取最新共享状态");
-  tree = render(false); assert.equal(value(tree), "72%");
+  state.usage = usage(28); assert.equal(value(render()), "72", "不打开菜单也应读取最新共享状态");
+  tree = render(false); assert.equal(value(tree), "72");
   assert.equal(tree.props.style.width, 24);
   state.usage.rate_limit.secondary_window = { used_percent: 80, limit_window_seconds: 18000 };
-  assert.equal(value(render()), "20%", "多窗口取最紧张的额度");
-  for (const [used, expected] of [[0, "100%"], [100, "0%"], [150, "0%"], [-1, "100%"], [null, "—"]]) {
+  tree = render(); assert.equal(value(tree), "20", "多窗口取最紧张的额度");
+  assert.equal(all(tree).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, "#bd7b16");
+  state.usage = usage(90);
+  assert.equal(all(render()).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, "#dc503f");
+  for (const [used, expected] of [[0, "100"], [100, "0"], [150, "0"], [-1, "100"], [null, "—"]]) {
     state.usage = usage(used); assert.equal(value(render()), expected);
   }
   state.usage = usage(19); state.auth = { ...baseAuth, accountId: "other" };
   assert.equal(value(render()), "—", "切换账号时不能显示旧账号额度");
   state.usage.account_id = "other"; state.usage.rate_limit.primary_window.used_percent = 46;
-  assert.equal(value(render()), "54%");
+  assert.equal(value(render()), "54");
   state.auth = { ...baseAuth, isLoading: true }; assert.equal(value(render()), "—");
   state.auth = baseAuth; state.usage = null; assert.equal(value(render()), "—");
   state.usage = usage(19); state.locale = "en-US";

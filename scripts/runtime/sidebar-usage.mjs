@@ -10,9 +10,11 @@ export function renderSidebarUsage({ compact, auth, usage, intl, jsx }) {
   // 多窗口取最紧张的一项；不能用缺失数据推算出 100%。
   const remaining = windows.length ? Math.min(...windows.map(window =>
     Math.max(0, Math.min(100, 100 - window.used_percent)))) : null;
-  const percent = remaining == null ? "—" : intl.formatNumber(remaining, { maximumFractionDigits: 0 }) + "%";
+  const displayValue = remaining == null ? "—" : intl.formatNumber(remaining, { maximumFractionDigits: 0 });
+  const percent = remaining == null ? displayValue : `${displayValue}%`;
   const accent = "var(--app-color-text-accent,var(--codex-base-accent,currentColor))";
-  const color = remaining == null ? "currentColor" : remaining <= 10 ? "#dc503f" : remaining <= 25 ? "#bd7b16" : accent;
+  const color = remaining == null ? "currentColor" : remaining <= 10 ? "#dc503f" : remaining <= 25 ? "#bd7b16"
+    : `color-mix(in srgb, ${accent} 75%, var(--color-text))`;
   const details = windows.map(window => {
     const hours = window.limit_window_seconds / 3600;
     const period = hours === 168 ? (zh ? "每周" : "Weekly")
@@ -33,15 +35,14 @@ export function renderSidebarUsage({ compact, auth, usage, intl, jsx }) {
       // 官方按钮会自动缩放内部 SVG；使用其原生豁免，并把数字置于同一坐标系。
       style: { display: "block", width: size, height: size, flex: "none", margin: 0, overflow: "visible" },
       children: [jsx.jsx("circle", {
-        cx: 18, cy: 18, r: 15, fill: "none", stroke: "currentColor", strokeWidth: 2.5, opacity: 0.2,
+        cx: 18, cy: 18, r: 15, fill: "none", stroke: "currentColor", strokeWidth: 2, opacity: 0.1,
       }), remaining == null ? null : jsx.jsx("circle", {
-        cx: 18, cy: 18, r: 15, fill: "none", stroke: color, strokeWidth: 2.5,
+        cx: 18, cy: 18, r: 15, fill: "none", stroke: color, strokeWidth: 2,
         pathLength: 100, strokeDasharray: `${remaining} 100`, transform: "rotate(-90 18 18)",
       }), jsx.jsx("text", {
         "data-codex-sidebar-usage-value": true, x: 18, y: 18, textAnchor: "middle", dominantBaseline: "central",
-        textLength: percent.length >= 4 ? 26 : undefined, lengthAdjust: "spacingAndGlyphs",
-        style: { fill: "var(--color-text)", opacity: 1, fontSize: compact ? 13 : 15, fontWeight: 700, fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
-        children: percent,
+        style: { fill: "var(--color-text)", opacity: 1, fontSize: compact ? 13 : 15, fontWeight: 500, fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
+        children: displayValue,
       })],
     })],
   });
