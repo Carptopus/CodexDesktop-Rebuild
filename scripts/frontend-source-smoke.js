@@ -77,10 +77,11 @@ function verifyFrontendSource(assets) {
   assert.match(themeSource, /__codexResolveAccentPreset/);
   assert.match(themeSource, /accentSource:`chatgpt`/);
   const navigationEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("Codex：API-key 首页记录真实会话。"));
+    && fs.readFileSync(path.join(assets, name), "utf8").includes("Codex：API-key 首页使用官方记录器。"));
   assert.equal(navigationEntries.length, 1);
   const navigationSource = fs.readFileSync(path.join(assets, navigationEntries[0]), "utf8");
-  assert.match(navigationSource, /\/\* Codex：API-key 首页记录真实会话。 \*\/if\(([A-Za-z_$][\w$]*)===`apikey`&&([A-Za-z_$][\w$]*)\.state\?\.sidebarThreadLocationId!=null\)\{([A-Za-z_$][\w$]*)\.set\(([A-Za-z_$][\w$]*),\2\.pathname\);\}/);
+  assert.match(navigationSource, /\/\* Codex：API-key 首页使用官方记录器。 \*\/if\([A-Za-z_$][\w$]*===`apikey`\)\{QBa\([A-Za-z_$][\w$]*,\{accountKey:`auth:apikey`,auth:[A-Za-z_$][\w$]*,location:[A-Za-z_$][\w$]*,productMode:[A-Za-z_$][\w$]*\}\);return;\}/);
+  assert.doesNotMatch(navigationSource, /Codex：API-key 首页记录真实会话。/);
   assert.match(navigationSource,
     /\([A-Za-z_$][\w$]*\|\|\/\* Codex：API-key 首页保持当前位置。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*===`home`\)&&[A-Za-z_$][\w$]*!=null/);
   assert.match(navigationSource,

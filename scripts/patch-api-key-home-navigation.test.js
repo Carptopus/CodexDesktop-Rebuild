@@ -97,25 +97,45 @@ test("API-key 在活动导航记录器写入真实会话", () => {
 
   assert.equal(result.status, "patched");
   assert.ok(result.source.includes(MARKER));
-  assert.match(result.source, /Codex：API-key 首页记录真实会话。 \*\/if\(u===`apikey`&&r\.state\?\.sidebarThreadLocationId!=null\)\{n\.set\(m,r\.pathname\);\}/);
+  assert.match(result.source, /QBa\(n,\{accountKey:`auth:apikey`,auth:c,location:r,productMode:o\}\);return;/);
+  assert.doesNotMatch(result.source, /n\.set\(m,r\.pathname\)/);
   assert.doesNotMatch(result.source, /首页恢复写入/);
 });
 
-test("官方导航记录器保留 ChatGPT 条件并在 API-key 下记录真实会话", () => {
-  const active = patchSource(fixture()).source.split("function Active(){")[1].split("function restore")[0];
-  const statement = active.match(/if\(([A-Za-z_$][\w$]*)===`apikey`&&([A-Za-z_$][\w$]*)\.state\?\.sidebarThreadLocationId!=null\)\{([A-Za-z_$][\w$]*)\.set\(([A-Za-z_$][\w$]*),\2\.pathname\);\}/);
-  assert.ok(statement, "API-key 记录语句应位于官方活动导航目标回调中");
-  const [, authMethod, current, store, destination] = statement;
-  const target = {};
-  const location = { pathname: "/local/thread-1", state: { sidebarThreadLocationId: "thread-1" } };
-  const run = method => Function("method", "current", "store", "destination", "target",
-    `if(method===\"apikey\"&&current.state?.sidebarThreadLocationId!=null){target.local=current.pathname}`)
-    (method, location, target, "local", target);
-  run("apikey");
-  assert.equal(target.local, "/local/thread-1");
-  delete target.local;
-  run("chatgptAuthTokens");
-  assert.equal(target.local, undefined);
+test("活动回调在会话和设置页都委托官方记录器，且不向仓库传入导航 ID", () => {
+  const source = patchSource(fixture()).source;
+  const calls = [];
+  const activeStore = { set() { assert.fail("不能将导航 ID 当作 atom 写入仓库"); } };
+  const invoke = Function("current", "method", "activeStore", "record", [
+    "const cache=()=>[true],store=()=>activeStore,location=()=>current;",
+    "const useContext=()=>({activeDestinationId:null}),Ctx={},q=x=>x;",
+    "const capability=()=>false,productMode=()=>`codex`,project=()=>null;",
+    "const auth=()=>({authMethod:method}),QBa=record;",
+    "const react={useLayoutEffect:callback=>callback()};",
+    source,
+    "Active();",
+  ].join(""));
+  for (const current of [
+    { pathname: "/local/thread-1", state: { sidebarThreadLocationId: "chats" } },
+    { pathname: "/settings/general", state: null },
+  ]) {
+    invoke(current, "apikey", activeStore, (store, options) => calls.push({ store, options }));
+    const call = calls.at(-1);
+    assert.equal(call.store, activeStore);
+    assert.equal(call.options.accountKey, "auth:apikey");
+    assert.equal(call.options.auth.authMethod, "apikey");
+    assert.equal(call.options.location, current);
+    assert.equal(call.options.productMode, "codex");
+    assert.equal(Object.hasOwn(call.options, "destinationId"), false);
+  }
+  assert.equal(calls.length, 2, "每次路由变化只调用一次官方记录器");
+});
+
+test("拒绝曾导致真实 API-key 页面崩溃的旧写入补丁", () => {
+  const broken = fixture().replace("function Rail", "/* Codex：API-key 首页记录真实会话。 */function Rail");
+  const result = patchSource(broken);
+  assert.equal(result.status, "unexpected-shape");
+  assert.match(result.reason, /错误的状态仓库写入/);
 });
 
 test("builtin:home 通过公共恢复函数保持 API-key 当前首页会话", () => {

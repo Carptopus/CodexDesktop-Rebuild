@@ -16,7 +16,8 @@ const { parse } = require("acorn");
 const { applyEdits, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
-const MARKER = "/* Codex：API-key 首页记录真实会话。 */";
+const MARKER = "/* Codex：API-key 首页使用官方记录器。 */";
+const BROKEN_TRACKER_MARKER = "/* Codex：API-key 首页记录真实会话。 */";
 const INVALID_TRACKER_MARKER = "/* Codex：API-key 首页恢复写入。 */";
 const HOME_CURRENT_MARKER = "/* Codex：API-key 首页保持当前位置。 */";
 const HOME_STATE_MARKER = "/* Codex：API-key 首页保持当前。 */";
@@ -294,9 +295,10 @@ function isApiKeyRestoreOverride(node) {
 }
 
 function activeDestinationStatement(tracker) {
-  return `${MARKER}if(${tracker.authMethod}===\`apikey\`&&` +
-    `${tracker.location}.state?.sidebarThreadLocationId!=null){` +
-    `${tracker.store}.set(${tracker.destinationId},${tracker.location}.pathname);}`;
+  // 交给官方记录器处理 atom、路由分类及离开时间；空 destinationId 会阻止记录。
+  return `${MARKER}if(${tracker.authMethod}===\`apikey\`){` +
+    `${tracker.recorder}(${tracker.store},{accountKey:\`auth:apikey\`,` +
+    `auth:${tracker.auth},location:${tracker.location},productMode:${tracker.productMode}});return;}`;
 }
 
 function findActiveDestinationTracker(ast, source) {
@@ -307,8 +309,11 @@ function findActiveDestinationTracker(ast, source) {
       node.callee?.type === "Identifier" && node.callee.name === "QBa" &&
       node.arguments.length === 2 && node.arguments[0]?.type === "Identifier" &&
       node.arguments[1]?.type === "ObjectExpression");
-    if (calls.length !== 1) continue;
-    const call = calls[0];
+    // 已补丁的回调会多一个 API-key 调用；以官方包含 destinationId 的调用为锚点。
+    const officialCalls = calls.filter(node => node.arguments[1].properties
+      .some(item => propertyName(item) === "destinationId"));
+    if (officialCalls.length !== 1) continue;
+    const call = officialCalls[0];
     const callback = all.filter(node => node.type === "ArrowFunctionExpression" &&
       node.start <= call.start && node.end >= call.end).at(-1);
     if (callback?.body.type !== "BlockStatement") continue;
@@ -327,6 +332,7 @@ function findActiveDestinationTracker(ast, source) {
     const sharedAuth = usesSharedAuth(callback, auth) ||
       nodes(callback.body, node => node.type === "Identifier" && node.name === properties.auth.name).length > 0;
     const details = { authMethod: auth.authMethod, callback,
+      recorder: call.callee.name, auth: properties.auth.name, productMode: properties.productMode.name,
       destinationId: properties.destinationId.name, location: properties.location.name,
       store: call.arguments[0].name, alreadyPatched: marker };
     if (!marker && !sharedAuth) continue;
@@ -346,6 +352,10 @@ function usesSharedAuth(callback, auth) {
 
 
 function patchSource(source) {
+  if (source.includes(BROKEN_TRACKER_MARKER)) {
+    return { status: "unexpected-shape", source,
+      reason: "检测到错误的状态仓库写入补丁；必须从干净的上游 Bundle 重新构建" };
+  }
   const previousMarker = source.includes(INVALID_TRACKER_MARKER);
   if (previousMarker) {
     return { status: "unexpected-shape", source, reason: "检测到上一版首页恢复补丁；必须从未应用旧补丁的上游 Bundle 重新构建" };
