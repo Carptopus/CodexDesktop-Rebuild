@@ -80,7 +80,23 @@ function verifyFrontendSource(assets) {
     && fs.readFileSync(path.join(assets, name), "utf8").includes("Codex：API-key 首页使用官方记录器。"));
   assert.equal(navigationEntries.length, 1);
   const navigationSource = fs.readFileSync(path.join(assets, navigationEntries[0]), "utf8");
-  assert.match(navigationSource, /\/\* Codex：API-key 首页使用官方记录器。 \*\/if\([A-Za-z_$][\w$]*===`apikey`\)\{QBa\([A-Za-z_$][\w$]*,\{accountKey:`auth:apikey`,auth:[A-Za-z_$][\w$]*,location:[A-Za-z_$][\w$]*,productMode:[A-Za-z_$][\w$]*\}\);return;\}/);
+  const recorder = /\/\* Codex：API-key 首页使用官方记录器。 \*\/if\([A-Za-z_$][\w$]*===`apikey`\)\{([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*,\{accountKey:`auth:apikey`,auth:[A-Za-z_$][\w$]*,location:[A-Za-z_$][\w$]*,productMode:[A-Za-z_$][\w$]*\}\);return;\}/.exec(navigationSource);
+  assert.ok(recorder, "API-key 首页必须调用结构完整的官方记录器");
+  // 校验实际调用契约，不绑定压缩函数名；仍要求与原生五字段调用共用唯一记录器。
+  const navigationAst = parse(navigationSource, { ecmaVersion: "latest", sourceType: "module" });
+  let recorderDefinitions = 0, officialRecorderCalls = 0;
+  walk(navigationAst, node => {
+    if (node.type === "FunctionDeclaration" && node.id?.name === recorder[1]) recorderDefinitions++;
+    if (node.type !== "CallExpression" || node.callee?.name !== recorder[1] ||
+        node.arguments.length !== 2 || node.arguments[0]?.type !== "Identifier" ||
+        node.arguments[1]?.type !== "ObjectExpression") return;
+    const properties = node.arguments[1].properties;
+    if (properties.length === 5 && ["accountKey", "auth", "location", "productMode", "destinationId"]
+      .every(name => properties.filter(property => property.key?.name === name &&
+        property.value?.type === "Identifier").length === 1)) officialRecorderCalls++;
+  });
+  assert.equal(recorderDefinitions, 1, "官方首页记录器定义必须唯一");
+  assert.equal(officialRecorderCalls, 1, "官方首页五字段记录调用必须唯一");
   assert.doesNotMatch(navigationSource, /Codex：API-key 首页记录真实会话。/);
   assert.match(navigationSource,
     /\([A-Za-z_$][\w$]*\|\|\/\* Codex：API-key 首页保持当前位置。 \*\/[A-Za-z_$][\w$]*===`auth:apikey`&&[A-Za-z_$][\w$]*===`home`\)&&[A-Za-z_$][\w$]*!=null/);
