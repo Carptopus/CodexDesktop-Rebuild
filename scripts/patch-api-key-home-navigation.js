@@ -306,12 +306,18 @@ function findActiveDestinationTracker(ast, source) {
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
     const all = nodes(fn, () => true);
     const calls = all.filter(node => node.type === "CallExpression" &&
-      node.callee?.type === "Identifier" && node.callee.name === "QBa" &&
+      node.callee?.type === "Identifier" &&
       node.arguments.length === 2 && node.arguments[0]?.type === "Identifier" &&
       node.arguments[1]?.type === "ObjectExpression");
     // 已补丁的回调会多一个 API-key 调用；以官方包含 destinationId 的调用为锚点。
-    const officialCalls = calls.filter(node => node.arguments[1].properties
-      .some(item => propertyName(item) === "destinationId"));
+    // 压缩器会重命名记录器；以完整官方调用契约定位，不能绑定 QBa 等临时名。
+    const officialCalls = calls.filter(node => {
+      const properties = node.arguments[1].properties;
+      return properties.length === 5 &&
+        ["accountKey", "auth", "location", "productMode", "destinationId"]
+          .every(name => properties.filter(item => propertyName(item) === name &&
+            item.value?.type === "Identifier").length === 1);
+    });
     if (officialCalls.length !== 1) continue;
     const call = officialCalls[0];
     const callback = all.filter(node => node.type === "ArrowFunctionExpression" &&

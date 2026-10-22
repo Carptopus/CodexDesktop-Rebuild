@@ -51,3 +51,46 @@ test("拒绝继续处理曾经强开 gate 的污染 Bundle", () => {
 test("没有 Remote Control 同步组件时不适用", () => {
   assert.equal(patchSource("const value=1;").status, "not-applicable");
 });
+
+test("26.1016 真实 Bundle 的 Remote Control 认证切换行为", { skip: !process.env.CODEX_REBUILD_1016_BUNDLE }, async () => {
+  const fs = require("node:fs");
+  const vm = require("node:vm");
+  const { parse } = require("acorn");
+  const source = fs.readFileSync(process.env.CODEX_REBUILD_1016_BUNDLE, "utf8");
+  const result = patchSource(source);
+  assert.equal(result.status, "patched", result.reason);
+  assert.equal(patchSource(result.source).status, "already-patched");
+  const functions = parse(result.source, { ecmaVersion: "latest", sourceType: "module" }).body
+    .filter((node) => node.type === "FunctionDeclaration");
+  const extract = (name) => {
+    const matches = functions.filter((node) => node.id.name === name);
+    assert.equal(matches.length, 1);
+    return result.source.slice(matches[0].start, matches[0].end);
+  };
+  const events = [], container = {};
+  let account, enabled = true;
+  const context = vm.createContext({
+    E: () => container, J: {}, Czl: () => [enabled, (value) => { events.push(["storage", value]); enabled = value; }],
+    Z: () => account, $h: {}, rvu: async (target, value) => { assert.equal(target, container); events.push(["sync", value]); },
+    gvu: { useEffect: (effect) => effect() }, xvu: { useEffect: (effect) => effect() },
+    $v: () => ({ checkGate: () => true, isLoading: false }), F_i: "pairing",
+    tu: async (method, value) => events.push([method, JSON.parse(JSON.stringify(value.params))]),
+  });
+  vm.runInContext(`${extract("mvu")};${extract("yvu")}`, context);
+  for (const authMethod of ["apikey", "chatgpt", "copilot"]) {
+    enabled = true;
+    events.length = 0;
+    account = { authMethod, authLoading: true };
+    context.mvu(); context.yvu();
+    assert.deepEqual(events, [], "认证加载期间不触发同步或状态清理");
+    account = { authMethod, authLoading: false };
+    context.mvu(); context.yvu();
+    await Promise.resolve();
+    const chatgpt = authMethod === "chatgpt";
+    assert.deepEqual(events, [
+      ...chatgpt ? [] : [["storage", false]],
+      ["sync", chatgpt],
+      ["set-remote-control-connections-enabled", { enabled: chatgpt, oneToOnePairingInAppEnabled: chatgpt }],
+    ]);
+  }
+});

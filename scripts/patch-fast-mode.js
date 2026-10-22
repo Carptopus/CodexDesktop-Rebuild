@@ -65,12 +65,15 @@ function comparisonOperand(node, source, operator, value) {
 function exactAuthPair(node, source, logicalOperator, comparisonOperator) {
   if (node?.type !== "LogicalExpression" || node.operator !== logicalOperator) return null;
   const terms = flattenLogical(node, logicalOperator);
-  if (terms.length !== 2) return null;
-  const chatGpt = terms.map((term) =>
-    comparisonOperand(term, source, comparisonOperator, "chatgpt")).find(Boolean);
-  const token = terms.map((term) =>
-    comparisonOperand(term, source, comparisonOperator, "personalAccessToken")).find(Boolean);
-  return chatGpt != null && chatGpt === token ? chatGpt : null;
+  // 新版在账户 requirements 白名单中加入 Bedrock；只接受这两种已核实的完整集合。
+  const methods = ["chatgpt", "personalAccessToken"];
+  if (terms.length === 3) methods.push("amazonBedrock");
+  if (terms.length !== methods.length) return null;
+  const operands = methods.map((method) => terms.map((term) =>
+    comparisonOperand(term, source, comparisonOperator, method)).filter(Boolean));
+  if (operands.some((items) => items.length !== 1) ||
+      operands.some((items) => items[0] !== operands[0][0])) return null;
+  return operands[0][0];
 }
 
 function count(source, value) {

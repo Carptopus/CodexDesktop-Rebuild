@@ -147,6 +147,20 @@ function findCurrentAuth(allFunctions, source) {
           !assigned.has(call.arguments[0].name)) continue;
       hooks.add(call.callee.name);
     }
+    if (hooks.size === 0) {
+      // 新版移除了认证 selector 的单句 Hook 包装；从实际使用完整认证 atom
+      // 且含 React effect 的组件中定位 Hook，避免把 selector 的 get 当成 Hook。
+      for (const component of allFunctions) {
+        const effects = descendants(component, (node) => node.type === "CallExpression" &&
+          propertyName(memberCallee(node)) === "useEffect", { skipNestedFunctions: true });
+        if (effects.length === 0) continue;
+        const calls = descendants(component, (node) => node.type === "CallExpression" &&
+          node.callee?.type === "Identifier" && node.arguments.length === 1 &&
+          node.arguments[0]?.type === "Identifier" &&
+          node.arguments[0].name === account[0].left.name, { skipNestedFunctions: true });
+        for (const call of calls) hooks.add(call.callee.name);
+      }
+    }
     if (hooks.size !== 1) continue;
     candidates.push({
       initializer: fn,

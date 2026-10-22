@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const acorn = require("acorn");
 
 const {
   HOME_CURRENT_MARKER,
@@ -10,6 +12,57 @@ const {
   MARKER,
   patchSource,
 } = require("./patch-api-key-home-navigation");
+
+// 可选的官方资源功能验收；输入只读，直接执行已补丁的真实函数。
+test("26.1016 真实 Bundle：首页记录、离开及完整状态恢复", {
+  skip: !process.env.CODEX_PATCH_REAL_BUNDLE,
+}, () => {
+  const source = fs.readFileSync(process.env.CODEX_PATCH_REAL_BUNDLE, "utf8");
+  const result = patchSource(source);
+  assert.equal(result.status, "patched", result.reason);
+  const again = patchSource(result.source);
+  assert.equal(again.status, "already-patched", again.reason);
+  assert.equal(again.source, result.source);
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const functions = ["mEc", "uKa", "CKa", "xKa", "SKa", "$Ga", "eKa", "dKa", "pKa", "mKa", "bKa"]
+    .map(name => {
+      const matches = ast.body.filter(node => node.type === "FunctionDeclaration" && node.id.name === name);
+      assert.equal(matches.length, 1, `真实函数 ${name} 必须唯一`);
+      return result.source.slice(matches[0].start, matches[0].end);
+    }).join("\n");
+  const harness = Function("assert", `
+    const atoms=Object.fromEntries(["jE","HE","EL","hC","sC","DKa","EKa","CD","OL","tg","Gy","kw","Aw","Ow","fEc"].map(id=>[id,{id}]));
+    const {jE,HE,EL,hC,sC,DKa,EKa,CD,OL,tg,Gy,kw,Aw,Ow,fEc}=atoms;
+    const values=new Map([[jE,false],[EL,"codex"],[hC,{projectId:"sample"}],[sC,{}]]),records=new Map();
+    const store={get(atom,partition){assert.ok(atom?.id,"get 必须使用 atom");return atom===EKa?(records.get(partition)||{}):values.get(atom)},
+      set(atom,...args){assert.ok(atom?.id,"set 必须使用 atom");if(atom===EKa)records.set(args[0],args[1]);else values.set(atom,args[0])}};
+    let current,navigated=null;const auth={authMethod:"apikey"};
+    values.set(CD,{prepareNavigation:(pathname,options)=>()=>{navigated={pathname,...options}}});
+    const J={},uEc={},hEc={c:()=>[]},gEc={useContext:()=>null,useLayoutEffect:fn=>fn()};
+    const E=()=>store,Wa=()=>current,DT=()=>auth,Z=atom=>store.get(atom);
+    const gL={home:{destinationId:"builtin:home"}},Ty="/",wKa=480000;
+    const qke={},Ewe={},BI="/review",ia=()=>null,no=()=>false,nOe=()=>null;
+    const eb=({pathname})=>({routeKind:pathname.startsWith("/settings")?"other":"home"});
+    const Me=location=>location.pathname,Cwn=()=>{};
+    ${functions}
+    return {visit(location){current=location;values.set(HE,location);mEc()},
+      click(){navigated=null;pKa(store,{accountKey:"auth:apikey",auth,area:"home",navigate:pathname=>{navigated={pathname}},productMode:"codex",state:{}});return navigated},
+      record(){return records.get("auth:apikey:codex")?.["builtin:home"]}};
+  `)(assert);
+  const thread = { pathname: "/local/sample-thread", key: "thread", search: "", hash: "",
+    state: { sidebarThreadLocationId: "chats", sidebarProductMode: "codex", sidebarProductModeAccountKey: "auth:apikey" } };
+  harness.visit(thread);
+  assert.equal(harness.record().location.pathname, thread.pathname);
+  assert.equal(harness.record().departedAt, null);
+  assert.equal(harness.click(), null);
+  harness.visit({ pathname: "/settings/general", key: "settings", search: "", hash: "", state: null });
+  assert.equal(harness.record().location.pathname, thread.pathname);
+  assert.ok(harness.record().departedAt > 0);
+  const restored = harness.click();
+  assert.equal(restored.pathname, thread.pathname);
+  assert.equal(restored.state.sidebarThreadLocationId, "chats");
+  assert.equal(restored.state.sidebarProductModeAccountKey, "auth:apikey");
+});
 
 function fixture() {
   return fixtureParts().join("");

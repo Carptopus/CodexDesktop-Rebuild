@@ -110,3 +110,40 @@ test("残缺补丁标记明确失败", () => {
   assert.equal(result.status, "unexpected-shape");
   assert.match(result.reason, /数量异常/);
 });
+
+// 明确指定未修改的 26.1016.8120.0 证据；不把大型官方 Bundle 放进公开仓库。
+test("26.1016 真实 Bundle 的设置与请求行为", { skip: !process.env.CODEX_REBUILD_1016_BUNDLE }, async () => {
+  const fs = require("node:fs");
+  const vm = require("node:vm");
+  const { parse } = require("acorn");
+  const source = fs.readFileSync(process.env.CODEX_REBUILD_1016_BUNDLE, "utf8");
+  const result = patchSource(source);
+  assert.equal(result.status, "patched", result.reason);
+  assert.equal(patchSource(result.source).status, "already-patched");
+  const functions = parse(result.source, { ecmaVersion: "latest", sourceType: "module" }).body
+    .filter((node) => node.type === "FunctionDeclaration");
+  const extract = (name) => {
+    const matches = functions.filter((node) => node.id.name === name);
+    assert.equal(matches.length, 1);
+    return result.source.slice(matches[0].start, matches[0].end);
+  };
+  let authMethod, pending, requests = 0;
+  const access = { fast: false, ultrafast: true };
+  const context = vm.createContext({
+    vLo: { c: () => [] }, Z: () => "local", vk: {}, OT: () => ({ authMethod, isLoading: false }),
+    Nc: () => ({ data: { access }, isPending: pending }), xC: {}, fCe: (value) => value.access,
+    Z6s: async () => authMethod, Hwn: async () => { requests++; return { access }; },
+  });
+  vm.runInContext(`${extract("_Lo")};${extract("t8s")}`, context);
+  for (authMethod of ["apikey", "chatgpt", "personalAccessToken", "amazonBedrock", "copilot"]) {
+    pending = false;
+    const ui = context._Lo();
+    const request = await context.t8s({ query: { setData() {} } }, "local");
+    const expected = authMethod === "apikey" ? { fast: true, ultrafast: true } : authMethod === "copilot" ? null : access;
+    assert.equal(JSON.stringify(ui.serviceTierAccess), JSON.stringify(expected));
+    assert.equal(JSON.stringify(request), JSON.stringify(expected));
+    pending = true;
+    assert.equal(context._Lo().isLoading, ["chatgpt", "personalAccessToken", "amazonBedrock"].includes(authMethod));
+  }
+  assert.equal(requests, 3, "API-key 与不支持的认证都不读取 requirements");
+});
