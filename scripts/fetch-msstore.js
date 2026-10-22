@@ -404,12 +404,7 @@ async function getDownloadUrl(updateID, revisionNumber, ring, digest) {
     if (fileDigest === digest && url) return url;
   }
 
-  // 如果 digest 匹配不到，返回第一个 URL
-  for (const loc of locations) {
-    const url = deepFind(loc, "Url");
-    if (url && typeof url === "string" && url.startsWith("http")) return url;
-  }
-
+  // 不得将其他包的 URL 作为主包下载地址。
   return "";
 }
 

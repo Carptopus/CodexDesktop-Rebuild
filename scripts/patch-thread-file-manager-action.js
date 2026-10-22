@@ -248,6 +248,24 @@ function findPatchContext(ast, source) {
 function findSidebarPatchContexts(ast, source) {
   const selectorGitGates = new Map();
   const contexts = [];
+  const remoteControlAtoms = new Set();
+
+  // 26.1016 将远程连接读取封装成派生 atom，确认读取 .remoteControl 的真实定义。
+  walk(ast, (node) => {
+    const name = node.type === "AssignmentExpression" && node.left?.type === "Identifier"
+      ? node.left.name : node.type === "VariableDeclarator" && node.id?.type === "Identifier"
+        ? node.id.name : null;
+    const call = node.type === "AssignmentExpression" ? node.right : node.init;
+    if (name == null || call?.type !== "CallExpression") return;
+    const selector = call.arguments[1];
+    const get = objectPatternBindings(selector?.params?.[0]).get("get");
+    const body = selector?.body?.type === "ChainExpression" ? selector.body.expression : selector?.body;
+    if (get != null && memberName(body) === "remoteControl" &&
+        body.object?.type === "CallExpression" && body.object.callee?.name === get &&
+        body.object.arguments.length === 1 && body.object.arguments[0].type === "Identifier") {
+      remoteControlAtoms.add(name);
+    }
+  });
 
   // 26.908 起，Git 仓库限制位于派生选择器中，而不是菜单 push 表达式中。
   walkWithAncestors(ast, (node, ancestors) => {
@@ -278,11 +296,28 @@ function findSidebarPatchContexts(ast, source) {
     if (
       conversationId == null ||
       hostId == null ||
-      get == null ||
-      !code.includes("remote_control_connections")
+      get == null
     ) {
       return;
     }
+
+    let derivedRemoteExclusion = false;
+    walk(node.body, (candidate) => {
+      if (candidate.type !== "UnaryExpression" || candidate.operator !== "!") return;
+      const some = candidate.argument?.type === "ChainExpression"
+        ? candidate.argument.expression : candidate.argument;
+      const read = some?.callee?.object;
+      const predicate = some?.arguments?.[0];
+      if (some?.type === "CallExpression" && memberName(some.callee) === "some" &&
+          read?.type === "CallExpression" && read.callee?.name === get &&
+          read.arguments.length === 1 && remoteControlAtoms.has(read.arguments[0]?.name) &&
+          predicate?.type === "ArrowFunctionExpression" && predicate.params[0]?.type === "Identifier" &&
+          predicate.body?.type === "BinaryExpression" && predicate.body.operator === "===" &&
+          memberName(predicate.body.left) === "hostId" &&
+          predicate.body.left.object?.name === predicate.params[0].name &&
+          predicate.body.right?.name === hostId) derivedRemoteExclusion = true;
+    });
+    if (!code.includes("remote_control_connections") && !derivedRemoteExclusion) return;
 
     const gitGates = [];
     walk(node.body, (candidate) => {

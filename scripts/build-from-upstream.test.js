@@ -17,6 +17,7 @@ const {
   getCodexBinarySource,
   getCometixCodexPackageSpec,
 } = require("./codex-binary-policy");
+const { registryCurlArgs, resolveCometixRegistryEntry } = require("./prepare-src");
 
 function createTemporaryOutput(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-dmg-test-"));
@@ -161,6 +162,41 @@ test("Cometix 平台包使用架构 dist-tag 而不是拼接主包版本", () =>
     () => getCometixCodexPackageSpec("linux-x64", { latest: distTags.latest }),
     /Missing @cometix\/codex dist-tag/,
   );
+});
+
+test("Cometix registry 元数据固定架构版本、HTTPS tarball 与完整性摘要", () => {
+  const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+  const metadata = {
+    "dist-tags": { "linux-x64": "1.2.3" },
+    versions: { "1.2.3": { dist: { integrity, tarball: "https://registry.example/codex.tgz" } } },
+  };
+  assert.deepEqual(resolveCometixRegistryEntry("linux-x64", metadata), {
+    integrity,
+    spec: "@cometix/codex@1.2.3",
+    tarball: "https://registry.example/codex.tgz",
+    version: "1.2.3",
+  });
+  assert.throws(
+    () => resolveCometixRegistryEntry("linux-x64", {
+      ...metadata,
+      versions: { "1.2.3": { dist: { tarball: "https://registry.example/codex.tgz" } } },
+    }),
+    /缺少可验证的 registry tarball/,
+  );
+  assert.throws(
+    () => resolveCometixRegistryEntry("linux-x64", {
+      ...metadata,
+      versions: { "1.2.3": { dist: { integrity, tarball: "http://registry.example/codex.tgz" } } },
+    }),
+    /必须使用 HTTPS/,
+  );
+});
+
+test("Cometix registry 下载禁止 HTTP 输入与降级重定向", () => {
+  const args = registryCurlArgs("https://registry.example/codex.tgz", "package.tgz");
+  assert.deepEqual(args.slice(0, 6), [
+    "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+  ]);
 });
 
 test("保留上游 CLI 时不会改写二进制", (t) => {

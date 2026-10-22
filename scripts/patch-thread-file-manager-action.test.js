@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const acorn = require("acorn");
 const vm = require("node:vm");
+const fs = require("node:fs");
+const { nodes } = require("./patch-ast-util");
 
 const {
   DIRECT_ACTION_ID,
@@ -12,6 +14,61 @@ const {
   patchSidebarSource,
   patchSource,
 } = require("./patch-thread-file-manager-action");
+
+test("26.1016 真实 Bundle：普通目录入口、远程排除和原打开链路", {
+  skip: !process.env.CODEX_PATCH_REAL_BUNDLE,
+}, async () => {
+  const original = fs.readFileSync(process.env.CODEX_PATCH_REAL_BUNDLE, "utf8");
+  const menu = patchSource(original);
+  assert.equal(menu.status, "patched");
+  const result = patchSidebarSource(menu.source);
+  assert.equal(result.status, "patched");
+  assert.equal(patchSource(result.source).source, result.source);
+  assert.equal(patchSidebarSource(result.source).source, result.source);
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const selectors = nodes(ast, node => node.type === "AssignmentExpression" &&
+    node.left?.name === "VUc");
+  assert.equal(selectors.length, 1);
+  const selector = selectors[0].right.arguments[1];
+  const select = vm.runInNewContext(`(${result.source.slice(selector.start, selector.end)})`, { ah: "remote" });
+  for (const connections of [[], [{ hostId: "local" }], [{ hostId: "other" }]]) {
+    assert.equal(select({ conversationId: "thread", hostId: "local" }, {
+      get: atom => { assert.equal(atom, "remote"); return connections; },
+    }), !connections.some(item => item.hostId === "local"));
+  }
+  const callers = nodes(ast, node => node.type === "LogicalExpression" &&
+    node.right?.type === "CallExpression" && node.right.callee?.property?.name === "push" &&
+    result.source.slice(node.start, node.end).includes("...LUc("));
+  assert.equal(callers.length, 1);
+  const expression = result.source.slice(callers[0].start, callers[0].end);
+  for (const cwd of [null, "C:\\plain-folder"]) {
+    const context = { v: cwd, e: { get: () => true }, VUc: {}, g: "thread", _: "local",
+      L: [], is: value => value, LUc: () => [{ id: DIRECT_ACTION_ID }] };
+    vm.runInNewContext(expression, context);
+    assert.equal(context.L.length, cwd == null ? 0 : 1);
+  }
+  const builder = ast.body.find(node => node.type === "FunctionDeclaration" && node.id.name === "LUc");
+  assert.ok(builder);
+  const builderSource = result.source.slice(builder.start, builder.end);
+  const openName = /onSelect:\(\)=>([\w$]+)\(/.exec(builderSource)?.[1];
+  assert.ok(openName);
+  let opened;
+  const scope = { get: () => null,
+    query: { getData: () => ({ targets: [{ target: "fileManager", available: true, resolvedIcon: "folder-icon" }] }),
+      getOptions: () => ({ queryKey: [] }), fetch: async () => ({}) },
+    queryClient: { getQueryState: () => ({ status: "success" }) } };
+  const context = { navigator: { platform: "Win32" }, Iq: {}, DJt: {}, ay: {},
+    scope, RUc: () => [{ id: "open-workspace-in", icon: "icon" }],
+    [openName]: params => { opened = params; } };
+  vm.runInNewContext(`${builderSource};items=LUc({scope,cwd:'C:/plain-folder',hostId:'local'})`, context);
+  assert.equal(context.items[0].id, DIRECT_ACTION_ID);
+  assert.equal(context.items[0].message.id, "sidebarElectron.openWorkspaceRootInExplorer");
+  context.items[0].onSelect();
+  assert.equal(opened.target, "fileManager");
+  assert.equal(opened.cwd, "C:/plain-folder");
+  assert.equal(opened.hostId, "local");
+  assert.equal(Object.hasOwn(opened, "persistPreferredTargetPath"), false);
+});
 
 function createGroupedMenuBundle(options = {}) {
   const openHelper = options.includeOpenHelper === false

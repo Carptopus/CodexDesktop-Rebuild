@@ -13,40 +13,62 @@ Cross-platform Electron build for OpenAI Codex Desktop App.
 ## Build
 
 ```bash
-# Install dependencies
-npm install
+# Install locked dependencies without native install scripts
+pnpm install --frozen-lockfile --ignore-scripts
+
+# Point downloads/extraction at an explicit disposable cache directory.
+# PowerShell: $env:CODEX_SYNC_DIR = Join-Path $env:TEMP "codex-rebuild"
+export CODEX_SYNC_DIR="${RUNNER_TEMP:-/tmp}/codex-rebuild"
 
 # Sync upstream resources, then apply all patches
-npm run sync
-npm run patch
+pnpm run sync
+pnpm run patch
 
 # Build for current platform
-npm run build
+pnpm run build
 
 # Build for specific platform
-npm run build:mac-x64
-npm run build:mac-arm64
-npm run build:win-x64
-npm run build:linux-x64
-npm run build:linux-arm64
+pnpm run build:mac-x64
+pnpm run build:mac-arm64
+pnpm run build:win-x64
+pnpm run build:linux-x64
+pnpm run build:linux-arm64
 
 # Build all platforms
-npm run build:all
+pnpm run build:all
 ```
 
 ## 补丁链路
 
 - `src/<platform>/_asar` 是 ASAR 内资源的补丁目标。
 - `src/<platform>/plugins` 与 `src/<platform>/cua_node` 是 Browser / Computer Use 等外置运行时的补丁目标；直打包流程会显式覆盖这两个目录，避免重新复制上游安装包缓存时丢失补丁。
-- `patch-browser-auth.js` 兼容 API-key 登录：ChatGPT 身份与 request-header 策略可用时保持原行为；身份读取失败时仅关闭该可选请求头并继续本地浏览器通道，不会把 API key 伪装或发送为 ChatGPT token。
-- `patch-image-generation-auth.js` 兼容自定义 `base_url` 的 API-key 登录：仅对非 OpenAI/ChatGPT 官方地址为 app-server 注入 provider 认证、`image_gen` 能力参数，并在没有静态模型目录时启用远端模型发现；显式关闭项及已有 `model_catalog_json`/`model_catalog_url` 均优先，API key 只经子进程环境传递，不写入用户配置或命令行。
+- `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
+- `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
+- `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
+- `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并在官方公共首页恢复函数中复用当前位置短路；当前会话点击首页保持不变，从设置等页面点击首页则恢复最近会话，避免直达空首页。ChatGPT、无认证、其他认证方式及非首页区域保持原有条件。
+- `patch-thread-timeline.js` 在当前 host 与 App Server 版本支持时启用官方 `thread/timeline/list` 历史路径，移除 API-key / 自定义 Provider 无法获得的远端灰度条件；版本兼容判断仍由官方逻辑负责。
+- `patch-mcp-status-refresh.js` 将短时间内的 MCP 启动状态通知合并为一次轻量目录刷新；Full 目录只标记为 stale、不在后台立即重拉，详细 MCP 页面后续仍按官方 Full 查询取得资源与模板。
+- `patch-remote-control.js` 不强开 Connections 或 Remote Control gate；只有真实 ChatGPT 认证才同步官方 Remote Control 本地状态，API-key 等其他认证会清除旧启用值并禁用当前 app-server 的 Remote Control。
+- `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
+- `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
+- `patch-hide-invite-menu.js` 隐藏账户菜单中的“邀请好友 / 邀请同事”入口。
+- `patch-sidebar-usage.js` 在 ChatGPT 登录时以剩余额度圆环和百分比替换侧栏头像，复用官方额度查询和刷新机制，点击仍打开原账户菜单。
+- `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
+- `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
+- `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
+- `patch-archive-delete.js` 让归档列表明确查询全部 Provider，避免切换 Provider 后旧归档被隐藏；新版上游已有原生删除链路时保持原样，旧版才补充永久删除入口。
+- `patch-updater.js` 区分更新方法与调用 Bundle，并在补丁后核对更新方法确实返回禁用状态；缺少目标或结构未知不再误报为已关闭。
+- `sync-upstream.js`、`fetch-msstore.js` 和 `build-from-upstream.js` 强化 Windows x64 官方包选择与固定来源校验，支持精确版本和已验证原始 MSIX 重放；包身份、大小或 SHA-256 不符时拒绝构建，运行检查通过前不生成最终 ZIP。
+- `windows-artifacts.js` 与 `windows-maintenance.js` 记录官方来源和候选产物哈希，生成候选、验证发布门槛，并保证正式发布复用已经验收的同一 ZIP。
+- `windows-runtime-checks.js` 检查 Windows EXE / 原生模块架构及未修改组件哈希，实际加载 CUA、运行 code-mode host / rg 基础命令，并执行空白隔离桌面的启动、就绪和退出冒烟。
+- `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径。这些属于补丁结构回归，只证明补丁仍能安全命中和拒绝未知结构；首页、主题、MCP 等运行效果仍以独立 GUI 验收项为准。
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
-- 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
+- 上游更新后应先执行 `pnpm run patch -- --check` 或完整 `pnpm run patch`，再运行测试和构建。
 
 ## Development
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 ## Project Structure
@@ -69,9 +91,9 @@ npm run dev
 
 ## CI/CD
 
-GitHub Actions automatically builds on:
-- Push to `master` / `main` and tag `v*` → build artifacts
-- 每日上游同步工作流：逐平台比较已保存的版本；仅在任一平台版本变化时下载上游、重新应用补丁、构建并更新 Release
+`Windows Candidate` 在面向 `master` 的 PR 上只运行语法、补丁和维护链回归检查，不下载或构建候选。推送到 `master`、`maintenance/**`、`candidate/**`，每日定时检查或手动触发时才构建候选 artifact；定时运行只有发现新的 Windows x64 官方版本时才构建。候选不会自动发布。
+
+候选完成真实 GUI 验收后，将审查过的验收 JSON 合入 `master`，再手动触发 `Promote Verified Windows Candidate`。晋升工作流下载并核对原候选 run 的同一 ZIP、源码提交、来源和全部必过验收项，然后创建 Release；不会重新打包替代已验收 ZIP。
 
 ### 上游补丁兼容检查
 
@@ -91,7 +113,7 @@ node scripts/patch-all.js mac-arm64 --check --report patch-reports/mac-arm64-che
 
 # 应用补丁，再构建
 node scripts/patch-all.js mac-arm64 --report patch-reports/mac-arm64-apply
-npm run build:mac-arm64
+pnpm run build:mac-arm64
 
 # 调试历史或单独解压的资源，可指定 src 根目录
 node scripts/patch-all.js win --check --source-dir /path/to/extracted/src --report patch-reports/win-check

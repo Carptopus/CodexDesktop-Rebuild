@@ -68,6 +68,25 @@ function collectPatches(ast, source) {
   return patches;
 }
 
+// 独立后置检查：没有目标和不认识的函数体不能当成更新已关闭。
+function auditUpdaterSource(source) {
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const methods = [];
+  walk(ast, (node) => {
+    if (!["Property", "MethodDefinition", "FunctionDeclaration"].includes(node.type)) return;
+    const name = node.key?.name || node.key?.value || node.id?.name;
+    if (!UPDATER_METHODS.has(name)) return;
+    const body = node.type === "FunctionDeclaration" ? node.body : node.value?.body;
+    const statement = body?.type === "BlockStatement" && body.body.length === 1 ? body.body[0] : null;
+    const result = statement?.type === "ReturnStatement" ? statement.argument : null;
+    const disabled = result?.type === "Literal" && result.value === false
+      || result?.type === "UnaryExpression" && result.operator === "!"
+        && result.argument?.type === "Literal" && result.argument.value === 1;
+    methods.push({ name, disabled: Boolean(disabled) });
+  });
+  return methods;
+}
+
 function locateTargets(platform) {
   const platforms = platform
     ? [platform]
@@ -83,10 +102,7 @@ function locateTargets(platform) {
       if (!f.endsWith(".js")) continue;
       const fp = path.join(buildDir, f);
       const src = fs.readFileSync(fp, "utf-8");
-      if (
-        src.includes("shouldIncludeSparkle") &&
-        src.includes("shouldIncludeUpdater")
-      ) {
+      if ([...UPDATER_METHODS].some((name) => src.includes(name))) {
         targets.push({ platform: plat, path: fp });
       }
     }
@@ -101,7 +117,7 @@ function main() {
 
   const targets = locateTargets(platform);
   if (targets.length === 0) {
-    console.log("  [ok] No updater targets found");
+    console.log("  [!] No updater targets found; updater state needs review");
     return;
   }
 
@@ -112,7 +128,12 @@ function main() {
     const patches = collectPatches(ast, source);
 
     if (patches.length === 0) {
-      console.log("    [ok] Already patched or no match");
+      const methods = auditUpdaterSource(source);
+      console.log(methods.length === 0
+        ? "    [ok] Updater call sites only; this bundle defines no gates"
+        : methods.every((method) => method.disabled)
+          ? "    [ok] Updater methods are explicitly disabled"
+          : "    [!] No supported updater method matched; updater state needs review");
       continue;
     }
 
@@ -133,4 +154,6 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { auditUpdaterSource };

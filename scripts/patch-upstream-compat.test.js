@@ -70,26 +70,70 @@ test("识别上游原生工作区根目录传递链路", () => {
 });
 
 test("识别上游原生归档会话删除功能", () => {
-  const source = [
-    "delete-archived-conversation",
-    "delete-all-archived-conversations",
-    "showDeleteButton",
-    "settings.dataControls.archivedChats.deleteConfirm.title",
-    "thread/delete",
-  ].join("|");
+  const dataControls = [
+    "function DataControls(manager,ui){",
+    "const [pending,setPending]=useState(null);",
+    "const run=async target=>target.kind===`all`?manager.deleteAllArchivedConversations():manager.deleteArchivedConversation(target.thread.id);",
+    "const mutationConfig={mutationKey:[`delete-archived-conversations`],mutationFn:run};",
+    "const mutation=useMutation(mutationConfig);const confirm=()=>{if(pending){setPending(null);mutation.mutate(pending)}};",
+    "return ui(Dialog,{onConfirm:confirm,children:ui(Group,{onDelete:thread=>setPending({kind:`single`,thread})})});}",
+    "function Group(input){const {onDelete:openDelete}=input;",
+    "return ui(Row,{showDeleteButton:!0,onDelete:()=>openDelete(thread)})}",
+    "function Row(input){const {showDeleteButton:show,onDelete:remove}=input;",
+    "return show?button({onClick:()=>remove()}):null}",
+  ].join("");
+  const protocol = [
+    "class Manager{deleteArchivedConversation(id){return this.runtime.deleteArchivedThreads(`local`,id)}",
+    "deleteAllArchivedConversations(){return this.runtime.deleteArchivedThreads(`local`)}}",
+    "const runtime={async deleteArchivedThreads(host,id){let service=this.threadArchive;",
+    "return id==null?await service.deleteAllArchivedThreads({hostId:host}):await service.deleteArchivedThread({hostId:host,threadId:id})}};",
+    "async function deleteOne(appServer,id){return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})}",
+    "function notification(event,manager){if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])}",
+  ].join("");
 
-  assert.equal(hasNativeArchiveDelete(source), true);
-  assert.equal(hasNativeArchiveDelete(source.replace("thread/delete", "thread/archive")), false);
-
-  const currentSource = [
-    "delete-archived-conversation",
-    "delete-archived-conversations",
-    "deleteArchivedConversation",
-    "deleteAllArchivedConversations",
-    "showDeleteButton",
-    "thread/delete",
-  ].join("|");
-  assert.equal(hasNativeArchiveDelete(currentSource), true);
+  assert.equal(hasNativeArchiveDelete(dataControls, protocol), true);
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:thread=>setPending", "onDelete:thread=>noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace("thread/delete", "thread/archive")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onConfirm:confirm", "onCancel:confirm"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:()=>openDelete(thread)", "onDelete:noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("mutation.mutate(pending)", "mutation.mutate(other);void pending"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.runtime.archiveThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.dead.deleteArchivedThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})",
+      "void `thread/delete`;return appServer.sendAppServerRequest(`thread/archive`,{threadId:id})",
+    )),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])",
+      "if(event.method===`thread/deleted`){noop()}else{manager.handleThreadDeletion([event.params.threadId])}",
+    )),
+    false,
+  );
 });
 
 test("主进程入口兼容 bootstrap 与哈希 main 文件", () => {
