@@ -17,6 +17,7 @@
  *   node scripts/patch-thread-file-manager-action.js --check
  */
 const fs = require("fs");
+const path = require("path");
 const acorn = require("acorn");
 const { locateBundles, relPath } = require("./patch-util");
 
@@ -284,13 +285,16 @@ function restoreLegacyMenu(ast, source) {
     source.slice(returnNode.end);
 }
 
-function findSidebarPatchContexts(ast, source) {
+function findSidebarPatchContexts(ast, source, relatedSources = []) {
   const selectorGitGates = new Map();
   const contexts = [];
   const remoteControlAtoms = new Set();
+  const remoteControlExports = new Map();
 
   // 26.1016 将远程连接读取封装成派生 atom，确认读取 .remoteControl 的真实定义。
-  walk(ast, (node) => {
+  const collectRemoteControlAtoms = (moduleAst) => {
+    const atoms = new Set();
+    walk(moduleAst, (node) => {
     const name = node.type === "AssignmentExpression" && node.left?.type === "Identifier"
       ? node.left.name : node.type === "VariableDeclarator" && node.id?.type === "Identifier"
         ? node.id.name : null;
@@ -302,7 +306,35 @@ function findSidebarPatchContexts(ast, source) {
     if (get != null && memberName(body) === "remoteControl" &&
         body.object?.type === "CallExpression" && body.object.callee?.name === get &&
         body.object.arguments.length === 1 && body.object.arguments[0].type === "Identifier") {
-      remoteControlAtoms.add(name);
+      atoms.add(name);
+    }
+    });
+    return atoms;
+  };
+  for (const atom of collectRemoteControlAtoms(ast)) remoteControlAtoms.add(atom);
+
+  // app-primary 可能从 app-initial 导入 remoteControl 派生 atom；只按实际 ESM 导出/导入链解析。
+  for (const related of relatedSources) {
+    if (!related?.source || !related.path) continue;
+    let relatedAst;
+    try { relatedAst = parse(related.source); }
+    catch { continue; }
+    const atoms = collectRemoteControlAtoms(relatedAst);
+    const exported = new Set();
+    for (const statement of relatedAst.body) {
+      if (statement.type !== "ExportNamedDeclaration" || statement.source != null) continue;
+      for (const specifier of statement.specifiers) {
+        if (atoms.has(specifier.local?.name)) exported.add(specifier.exported?.name);
+      }
+    }
+    if (exported.size > 0) remoteControlExports.set(path.basename(related.path), exported);
+  }
+  walk(ast, (node) => {
+    if (node.type !== "ImportDeclaration") return;
+    const exported = remoteControlExports.get(path.basename(node.source.value));
+    if (!exported) return;
+    for (const specifier of node.specifiers) {
+      if (exported.has(specifier.imported?.name)) remoteControlAtoms.add(specifier.local.name);
     }
   });
 
@@ -608,7 +640,7 @@ function patchSource(source) {
   return { status: "patched", source: next };
 }
 
-function patchSidebarSource(source) {
+function patchSidebarSource(source, relatedSources = []) {
   if (source.includes(SIDEBAR_MARKER)) {
     return { status: "already-patched", source };
   }
@@ -623,7 +655,7 @@ function patchSidebarSource(source) {
     return { status: "parse-failed", phase: "before", error, source };
   }
 
-  const contexts = findSidebarPatchContexts(ast, source);
+  const contexts = findSidebarPatchContexts(ast, source, relatedSources);
   if (contexts.length !== 1) {
     return {
       status: "unexpected-sidebar-menu-gate-count",
@@ -701,7 +733,14 @@ function findTargets(platform) {
       source: fs.readFileSync(target.path, "utf-8"),
     }));
 
-  return selectTargets([...appInitialTargets, ...appPrimaryTargets]);
+  const bundles = [...appInitialTargets, ...appPrimaryTargets];
+  const targets = selectTargets(bundles);
+  return targets.map((target) => ({
+    ...target,
+    relatedSources: bundles.filter((bundle) =>
+      bundle.platform === target.platform && bundle.path !== target.path,
+    ),
+  }));
 }
 
 function main() {
@@ -735,7 +774,7 @@ function main() {
     const source = fs.readFileSync(target.path, "utf-8");
     const result =
       target.patchKind === "sidebar"
-        ? patchSidebarSource(source)
+        ? patchSidebarSource(source, target.relatedSources)
         : patchSource(source);
 
     if (result.status === "native") {

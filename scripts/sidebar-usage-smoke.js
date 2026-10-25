@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const { pathToFileURL } = require("node:url");
 const { parse } = require("acorn");
 const { nodes, unique } = require("./patch-ast-util");
-const { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, patchSource } = require("./patch-sidebar-usage");
+const { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, isSidebarSignature, patchSource } = require("./patch-sidebar-usage");
 
 const fixture = `let usageAtom;
 async function fetchUsage(){return http("/wham/usage")}
@@ -27,22 +27,47 @@ function Profile(input){
 
 async function main() {
   const args = process.argv.slice(2);
-  let source = fixture, rendererPath = path.join(__dirname, "runtime/sidebar-usage.mjs"), origin = "内置功能样本";
+  let source = fixture, relatedSources = [], rendererPath = path.join(__dirname, "runtime/sidebar-usage.mjs"), origin = "内置功能样本";
   let rendererUrl = pathToFileURL(rendererPath).href;
-  if (args[0] === "--asar" && args.length === 2) {
+  if (args[0] === "--assets" && args.length === 2) {
+    const assets = path.resolve(args[1]);
+    const target = findSidebarTarget(assets);
+    source = target.source;
+    if (!source.includes("/wham/usage")) {
+      const initial = unique(fs.readdirSync(assets).filter(name => /^app-initial-[^/\\]+\.js$/.test(name)), "共享账户额度 Bundle");
+      relatedSources = [{ name: initial, source: fs.readFileSync(path.join(assets, initial), "utf8") }];
+    }
+    origin = `${assets}:${target.name}`;
+  } else if (args[0] === "--asar" && args.length === 2) {
     const asar = await import("@electron/asar");
     const files = asar.listPackage(args[1]);
-    const entry = unique(files.filter(name => /app-initial-[^/\\]+\.js$/.test(name)), "真实侧栏 Bundle");
-    source = asar.extractFile(args[1], entry.replace(/^[/\\]/, "")).toString();
-    origin = `${args[1]}:${entry}`;
+    const candidates = files.filter(name => /app-(?:primary|initial)-[^/\\]+\.js$/.test(name));
+    const matches = candidates.map(name => ({ name, source: asar.extractFile(args[1], name.replace(/^[/\\]/, "")).toString() }))
+      .filter(file => isSidebarSignature(file.source));
+    const entry = unique(matches, "真实侧栏 Bundle");
+    source = entry.source;
+    if (!source.includes("/wham/usage")) {
+      const initial = unique(files.filter(name => /app-initial-[^/\\]+\.js$/.test(name)), "共享账户额度 Bundle");
+      relatedSources = [{ name: path.basename(initial), source: asar.extractFile(args[1], initial.replace(/^[/\\]/, "")).toString() }];
+    }
+    origin = `${args[1]}:${entry.name}`;
     if (source.includes(MARKER)) {
-      const embedded = asar.extractFile(args[1], path.join(path.dirname(entry), MODULE).replace(/^[/\\]/, "")).toString();
+      const embedded = asar.extractFile(args[1], path.join(path.dirname(entry.name), MODULE).replace(/^[/\\]/, "")).toString();
       // Git 在 Windows 构建机可能检出 CRLF；校验源码内容后直接执行成品模块。
       assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"), "候选渲染模块与当前源码不一致");
       rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
     }
-  } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--asar PATH]");
-  const result = patchSource(source);
+  } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--assets PATH | --asar PATH]");
+  if (relatedSources.length && !source.includes(MARKER)) {
+    const sourceAst = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    const linkedImport = unique(sourceAst.body.filter(node => node.type === "ImportDeclaration" &&
+      path.basename(node.source.value) === path.basename(relatedSources[0].name)), "测试账户额度导入链");
+    const broken = source.slice(0, linkedImport.source.start) + JSON.stringify("./missing-account-usage.js") + source.slice(linkedImport.source.end);
+    const rejected = patchSource(broken, { relatedSources });
+    assert.equal(rejected.status, "unexpected-shape");
+    assert.match(rejected.reason, /账户额度导入链/);
+  }
+  const result = patchSource(source, { relatedSources });
   assert.ok(["patched", "already-patched"].includes(result.status), result.reason);
   assert.equal(patchSource(result.source).source, result.source, "重复应用必须幂等");
   const ast = parse(result.source, { ecmaVersion: "latest", sourceType: "module" });

@@ -80,13 +80,58 @@ function importFor(ast, localName) {
   return null;
 }
 
-function getProviderMetadata(source) {
-  const ast = parseModule(source);
-  const providerReads = nodes(ast, node => node.type === "LogicalExpression" &&
+function providerReads(ast) {
+  return nodes(ast, node => node.type === "LogicalExpression" &&
     node.operator === "??" && node.left.type === "CallExpression" &&
     node.left.arguments.length === 2 && node.left.arguments[0]?.type === "Identifier" &&
     property(node.right) === "model_provider");
-  const providerAtoms = [...new Set(providerReads.map(node => node.left.arguments[0].name))];
+}
+
+function getProviderMetadata(source, { resolveModule } = {}) {
+  const ast = parseModule(source);
+  const providerAtoms = [...new Set(providerReads(ast).map(node => node.left.arguments[0].name))];
+  if (providerAtoms.length === 0 && resolveModule) {
+    // 26.1021 将 Composer 拆成独立模块。只从它真实导入的 initial 模块
+    // 追踪会话 Provider atom，核对 summary.modelProvider 定义及导出初始化器。
+    const imports = ast.body.filter(node => node.type === "ImportDeclaration" &&
+      /^\.\/app-initial-[^/]+\.js$/.test(node.source.value));
+    const dependencyName = unique([...new Set(imports.map(node => node.source.value))], "Composer initial dependency");
+    const dependency = { source: { value: dependencyName }, specifiers: imports.flatMap(node => node.specifiers) };
+    const dependencySource = resolveModule(dependency.source.value);
+    const dependencyAst = parseModule(dependencySource);
+    const name = unique([...new Set(providerReads(dependencyAst)
+      .map(node => node.left.arguments[0].name))], "Effective thread-provider dependency");
+    const initializer = unique(dependencyAst.body.filter(node => node.type === "FunctionDeclaration" &&
+      nodes(node, child => child.type === "AssignmentExpression" && child.left?.name === name &&
+        nodes(child.right, term => property(term) === "modelProvider").length === 1).length === 1),
+    "Thread-provider initializer");
+    const definition = unique(nodes(initializer, node => node.type === "AssignmentExpression" &&
+      node.left?.name === name), "Thread-provider definition");
+    if (!/\(\{summary:/.test(dependencySource.slice(definition.start, definition.end)) ||
+        !/\.modelProvider\|\|null/.test(dependencySource.slice(definition.start, definition.end))) {
+      throw new Error("Thread-provider summary definition changed");
+    }
+    const exports = dependencyAst.body.filter(node => node.type === "ExportNamedDeclaration")
+      .flatMap(node => node.specifiers);
+    const atomExport = unique(exports.filter(item => item.local.name === name), "Thread-provider export").exported.name;
+    const initExport = unique(exports.filter(item => item.local.name === initializer.id.name),
+      "Thread-provider initializer export").exported.name;
+    const aliases = [[atomExport, "__codexQuotaThreadProviderAtom"], [initExport, "__codexQuotaThreadProviderInit"]]
+      .map(([exported, fallback]) => {
+        const imported = dependency.specifiers.filter(item => item.imported?.name === exported);
+        if (imported.length > 1 || !imported.length && source.includes(fallback)) {
+          throw new Error("Thread-provider import binding is ambiguous/already occupied");
+        }
+        return imported[0]?.local.name ?? fallback;
+      });
+    const [atomAlias, initAlias] = aliases;
+    const missing = [[atomExport, atomAlias], [initExport, initAlias]]
+      .filter(([exported]) => !dependency.specifiers.some(item => item.imported?.name === exported));
+    return { threadProviderAtom: atomAlias,
+      threadProviderImport: { source: dependency.source.value, name: atomExport },
+      initialize: `${initAlias}(),`,
+      importText: missing.length ? `import{${missing.map(([exported, local]) => `${exported} as ${local}`).join(",")}}from${JSON.stringify(dependency.source.value)};` : "" };
+  }
   if (providerAtoms.length !== 1) {
     throw new Error("Effective thread-provider lookup is ambiguous/missing");
   }
@@ -119,11 +164,12 @@ function hasExternalBaseUrl(provider) {
   }
 }
 
-function patchSource(source) {
+function patchSource(source, options) {
   try {
     const updating = source.includes(MARKER);
     const ast = parseModule(source);
-    const { threadProviderAtom } = getProviderMetadata(source);
+    const metadata = getProviderMetadata(source, options);
+    const { threadProviderAtom } = metadata;
     if (!updating && [CUSTOM, PROVIDER, THREAD_PROVIDER, PROVIDER_CONFIG]
       .some(name => source.includes(name))) {
       throw new Error("Custom-provider patch binding already exists without its marker");
@@ -189,13 +235,15 @@ function patchSource(source) {
     const statement = unique(composer.body.body.filter(node => node.type === "VariableDeclaration" &&
       node.declarations.includes(disabled)), "Submit-disabled declaration");
     if (config.end > statement.start) throw new Error("Composer config is resolved after submission gating");
-    const guard = `${MARKER}\nconst ${THREAD_PROVIDER}=${source.slice(baseBlock.init.callee.start, baseBlock.init.callee.end)}(${threadProviderAtom},${conversation.name}),` +
+    const providerRead = `${source.slice(baseBlock.init.callee.start, baseBlock.init.callee.end)}(${threadProviderAtom},${conversation.name})`;
+    const guard = `${MARKER}\nconst ${THREAD_PROVIDER}=${metadata.initialize ? `(${metadata.initialize}${providerRead})` : providerRead},` +
       `${PROVIDER}=${THREAD_PROVIDER}??(${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_provider),` +
       `${PROVIDER_CONFIG}=${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_providers?.[${PROVIDER}],` +
       `${CUSTOM}=(${scope}.value.kind===\`local\`||${scope}.value.kind===\`new\`&&!${scope}.value.cloudThreadPrototype)` +
       `&&typeof ${PROVIDER}===\`string\`&&${PROVIDER}.trim().length>0&&${PROVIDER}!==\`openai\`` +
       `&&(${hasExternalBaseUrl.toString()})(${PROVIDER_CONFIG});`;
     const edits = [];
+    if (metadata.importText) edits.push({ start: 0, end: 0, text: metadata.importText });
     if (updating) {
       // Upgrade the previous provider-ID-only guard as well as fresh sources.
       // Keep the existing hook and quota-gate reads in their original positions.
@@ -262,10 +310,11 @@ function main() {
       const candidates = [];
       const diagnostics = [];
       for (const file of files.filter(file => file.source.includes("submitDisabled") &&
-        file.source.includes("model_provider") && file.source.includes("resolvedConfig") &&
+        file.source.includes("resolvedConfig") &&
         file.source.includes("isConfigDataPending"))) {
         try {
-          const result = patchSource(file.source);
+          const result = patchSource(file.source, { resolveModule: name =>
+            fs.readFileSync(path.join(directory.path, name), "utf8") });
           if (result.status === "error") throw new Error(result.reason);
           candidates.push({ file, result });
         }

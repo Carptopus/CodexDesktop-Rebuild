@@ -108,6 +108,83 @@ test("26.1016 真实 Bundle：普通目录入口、远程排除和工作区原�
   assert.equal(errors, 1, "真实系统打开失败仍走原生提示");
 });
 
+test("26.1021 app-primary 通过真实 ESM atom 链保留同 host 排除", {
+  skip: !process.env.CODEX_PATCH_1021_PRIMARY_BUNDLE || !process.env.CODEX_PATCH_1021_INITIAL_BUNDLE,
+}, async () => {
+  const primaryPath = process.env.CODEX_PATCH_1021_PRIMARY_BUNDLE;
+  const initialPath = process.env.CODEX_PATCH_1021_INITIAL_BUNDLE;
+  assert.equal(path.basename(primaryPath), "app-primary-844e405f2b90.js");
+  assert.equal(path.basename(initialPath), "app-initial-438d1df57f70.js");
+  const primary = fs.readFileSync(primaryPath, "utf8");
+  const initial = fs.readFileSync(initialPath, "utf8");
+  const openMenu = patchSource(primary);
+  assert.equal(openMenu.status, "patched");
+  const result = patchSidebarSource(openMenu.source, [{ path: initialPath, source: initial }]);
+  assert.equal(result.status, "patched", `${result.status} (${result.count})`);
+
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const selector = nodes(ast, node => node.type === "ArrowFunctionExpression" &&
+    result.source.slice(node.start, node.end).includes(SIDEBAR_MARKER) &&
+    node.params[1]?.type === "ObjectPattern" &&
+    node.params[1].properties.some(property => property.key?.name === "get"));
+  assert.equal(selector.length, 1);
+  const [gate] = selector;
+  const getName = gate.params[1].properties.find(property => property.key.name === "get").value.name;
+  const remoteAtom = nodes(gate, node => node.type === "CallExpression" && node.callee.name === getName &&
+    node.arguments[0]?.type === "Identifier")[0].arguments[0].name;
+  const select = vm.runInNewContext(`(${result.source.slice(gate.start, gate.end)})`, { [remoteAtom]: "remote-control" });
+  for (const [connections, expected] of [[[], true], [[{ hostId: "local" }], false], [[{ hostId: "other" }], true]]) {
+    assert.equal(select({ conversationId: "thread", hostId: "local" }, {
+      get: atom => atom === "remote-control" ? connections : true,
+    }), expected);
+  }
+
+  const caller = nodes(ast, node => node.type === "LogicalExpression" &&
+    node.right?.type === "CallExpression" && node.right.callee?.property?.name === "push" &&
+    result.source.slice(node.start, node.end).includes("...JYn("));
+  assert.equal(caller.length, 1);
+  const expression = result.source.slice(caller[0].start, caller[0].end);
+  for (const cwd of [null, "C:/plain-folder"]) {
+    const context = { y: cwd, e: { get: () => true }, QYn: {}, _: "thread", v: "local", R: [],
+      uu: value => value, JYn: () => [{ id: "latest-worktree-entry" }] };
+    vm.runInNewContext(expression, context);
+    assert.equal(context.R.length, cwd == null ? 0 : 1);
+    if (cwd != null) assert.equal(context.R[0].id, "latest-worktree-entry");
+  }
+  const currentRootLookup = nodes(ast, node => node.type === "FunctionDeclaration" && node.id.name === "JYn");
+  assert.equal(currentRootLookup.length, 1);
+  const context = {
+    navigator: { userAgentData: { platform: "Windows" } },
+    Ewe: {}, om: {}, rAe: {}, d9e: {}, ka: {}, ES: {}, FRe: {}, pw: {}, oce: {},
+    latestWorkspace: "C:/最新工作树", opened: null,
+    YYn: input => [{ id: "open-workspace-in", onOpenInTarget: input.onOpenInTarget }],
+    epe: async () => {},
+  };
+  context.scope = {
+    get: atom => atom === context.Ewe ? true : atom === context.rAe
+      ? { data: { latestWorktree: { workspaceRoot: context.latestWorkspace } } }
+      : atom === context.FRe ? context.pw : atom === context.oce
+        ? { mutateAsync: async input => { context.opened = input; return { success: true }; } }
+        : null,
+    query: {
+      getData: atom => atom === context.d9e
+        ? { targets: [{ target: "fileManager", available: true }], availableTargets: ["fileManager"] }
+        : undefined,
+      fetch: async () => ({}),
+      setData: () => {},
+      getOptions: () => ({ queryKey: [] }),
+    },
+    queryClient: { getQueryState: () => ({ status: "success" }) },
+  };
+  const builderSource = result.source.slice(currentRootLookup[0].start, currentRootLookup[0].end);
+  vm.runInNewContext(`${builderSource};items=JYn({scope,conversationId:'thread',cwd:'C:/plain-folder',hostId:'local'})`, context);
+  context.items[1].onOpenInTarget("vscode", "C:/Code.exe");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.opened.cwd, "C:/最新工作树");
+  assert.equal(context.opened.target, "vscode");
+  assert.equal(context.opened.hostId, "local");
+});
+
 function createGroupedMenuBundle(options = {}) {
   const openHelper = options.includeOpenHelper === false
     ? ""
@@ -542,8 +619,12 @@ test("CLI 在实际资源目录执行 check → apply → check，重复目标�
   fs.mkdirSync(assets, { recursive: true });
   const initial = path.join(assets, "app-initial-test.js");
   const primary = path.join(assets, "app-primary-test.js");
-  const source = createCurrentWorkspaceBundle() + createSelectorSidebarMenuBundle();
-  fs.writeFileSync(initial, "const initial=true;");
+  const initialSource = "const remoteConnections=derive(store,({get})=>get(config).remoteControl);" +
+    "export {remoteConnections as remoteConnectionsExport};";
+  const source = "import {remoteConnectionsExport as remoteConnections} from './app-initial-test.js';" +
+    createCurrentWorkspaceBundle() + createSelectorSidebarMenuBundle()
+      .replace("getState(g,`remote_control_connections`)", "g(remoteConnections)");
+  fs.writeFileSync(initial, initialSource);
   fs.writeFileSync(primary, source);
   const run = check => spawnSync(process.execPath,
     [path.join(__dirname, "patch-thread-file-manager-action.js"), "win", ...(check ? ["--check"] : [])],
@@ -551,13 +632,27 @@ test("CLI 在实际资源目录执行 check → apply → check，重复目标�
   const checked = run(true);
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
   assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, "const remoteConnections=true;");
+  const missingExport = run(true);
+  assert.equal(missingExport.status, 1);
+  assert.match(missingExport.stdout + missingExport.stderr, /unexpected-sidebar-menu-gate-count/);
+  assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, initialSource.replace(".remoteControl", ".otherConfig"));
+  const unrelatedAtom = run(true);
+  assert.equal(unrelatedAtom.status, 1);
+  assert.match(unrelatedAtom.stdout + unrelatedAtom.stderr, /unexpected-sidebar-menu-gate-count/);
+  assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, initialSource);
   const applied = run(false);
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
   const patched = fs.readFileSync(primary, "utf8");
   assert.ok(patched.includes(MARKER) && patched.includes(SIDEBAR_MARKER));
   assert.equal(run(true).status, 0);
   assert.equal(fs.readFileSync(primary, "utf8"), patched);
-  const menu = evaluatePatchedMenu(patched, "Windows");
+  const menu = evaluatePatchedMenu(patched.replace(
+    "import {remoteConnectionsExport as remoteConnections} from './app-initial-test.js';",
+    "",
+  ), "Windows");
   return menu.result[0].onSelect().then(() => {
     assert.equal(menu.opened.target, "fileManager");
     fs.writeFileSync(initial, source);

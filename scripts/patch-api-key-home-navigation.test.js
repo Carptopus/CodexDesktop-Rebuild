@@ -2,6 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const acorn = require("acorn");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 const {
   HOME_CURRENT_MARKER,
@@ -366,4 +369,81 @@ test("无关 Bundle 保持不变", () => {
 
   assert.equal(result.status, "not-applicable");
   assert.equal(result.source, source);
+});
+
+test("CLI 从共享账户字段的多个 chunk 中选择唯一完整首页链路", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-chunks-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assets = path.join(root, "win", "_asar", "webview", "assets");
+  fs.mkdirSync(assets, { recursive: true });
+  const unrelated = "const account={authMethod:`apikey`,accountKey:`auth:apikey`,productMode:`codex`,auth:`chatgpt:`};";
+  const shared = path.join(assets, "app-shared-test.js");
+  const primary = path.join(assets, "app-primary-test.js");
+  fs.writeFileSync(shared, unrelated);
+  fs.writeFileSync(primary, fixture());
+  const run = check => spawnSync(process.execPath,
+    [path.join(__dirname, "patch-api-key-home-navigation.js"), "win", ...(check ? ["--check"] : [])],
+    { encoding: "utf8", env: { ...process.env, CODEX_PATCH_SOURCE_DIR: root } });
+  const checked = run(true);
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  assert.equal(fs.readFileSync(primary, "utf8"), fixture());
+  const applied = run(false);
+  assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+  const patched = fs.readFileSync(primary, "utf8");
+  assert.ok(patched.includes(MARKER));
+  assert.equal(fs.readFileSync(shared, "utf8"), unrelated);
+  assert.equal(run(true).status, 0);
+  assert.equal(fs.readFileSync(primary, "utf8"), patched);
+  fs.writeFileSync(shared, unrelated + MARKER);
+  assert.equal(run(true).status, 1, "无跟踪器却包含残缺补丁时仍须拒绝");
+});
+
+test("26.1021 真实资源：首页记录、离开和设置页完整恢复", {
+  skip: !process.env.CODEX_REBUILD_1021_ASSETS,
+}, () => {
+  const directory = process.env.CODEX_REBUILD_1021_ASSETS;
+  const input = fs.readFileSync(path.join(directory, "app-primary-844e405f2b90.js"), "utf8");
+  assert.equal(require("node:crypto").createHash("sha256").update(input).digest("hex"),
+    "298f4c7bafe278563aa82ef8d8d4c1afe3f581d54915917849065085f7f621d2");
+  const result = patchSource(input);
+  assert.equal(result.status, "patched", result.reason);
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const functions = ["oNn", "HOt", "ekt", "jOt", "MOt", "ZOt", "$Ot", "QOt", "UOt", "KOt", "GOt"]
+    .map(name => {
+      const found = ast.body.filter(node => node.type === "FunctionDeclaration" && node.id.name === name);
+      assert.equal(found.length, 1, `真实函数 ${name} 必须唯一`);
+      return result.source.slice(found[0].start, found[0].end);
+    }).join("\n");
+  const harness = Function("assert", `
+    const atoms=Object.fromEntries(["PS","Wy","BD","vE","uP","lP","kS","iKe","xZe","xG"].map(id=>[id,{id}]));
+    const {PS,Wy,BD,vE,uP,lP,kS,iKe,xZe,xG}=atoms;
+    const values=new Map([[PS,false],[BD,"codex"],[vE,{projectId:"sample"}]]),records=new Map();
+    const store={get(atom,partition){assert.ok(atom?.id,"get 必须使用 atom");return atom===lP?(records.get(partition)||{}):values.get(atom)},
+      set(atom,...args){assert.ok(atom?.id,"set 必须使用 atom");if(atom===lP)records.set(args[0],args[1]);else values.set(atom,args[0])}};
+    let current,navigated=null;const auth={authMethod:"apikey"};
+    values.set(kS,{prepareNavigation:(pathname,options)=>()=>{navigated={pathname,...options}}});
+    const q={},yG={},sNn={c:()=>[]},cNn={useContext:()=>null,useLayoutEffect:fn=>fn()};
+    const Jd=()=>store,_n=()=>current,rw=()=>auth,X=atom=>store.get(atom);
+    const Fm={home:{destinationId:"builtin:home"}},sm="/orbit",tkt=480000;
+    const Sne="/site",Nte="/review",Co=()=>null,Ys=()=>null,jo=()=>false;
+    const sD=({pathname})=>({routeKind:pathname.startsWith("/settings")?"other":"home"});
+    const Ga=location=>location.pathname,m0e=(target,project)=>target.set(vE,project);
+    ${functions}
+    return {visit(location){current=location;values.set(Wy,location);oNn()},
+      click(){navigated=null;GOt(store,{accountKey:"auth:apikey",auth,area:"home",navigate:pathname=>{navigated={pathname}},productMode:"codex",state:{}});return navigated},
+      record(){return records.get("auth:apikey:codex")?.["builtin:home"]}};
+  `)(assert);
+  const thread = { pathname: "/local/sample-thread", key: "thread", search: "", hash: "",
+    state: { sidebarThreadLocationId: "chats", sidebarProductMode: "codex", sidebarProductModeAccountKey: "auth:apikey" } };
+  harness.visit(thread);
+  assert.equal(harness.record().location.pathname, thread.pathname);
+  assert.equal(harness.click(), null);
+  harness.visit({ pathname: "/settings/general", key: "settings", search: "", hash: "", state: null });
+  assert.equal(harness.record().location.pathname, thread.pathname);
+  assert.ok(harness.record().departedAt > 0);
+  const restored = harness.click();
+  assert.equal(restored.pathname, thread.pathname);
+  assert.equal(restored.state.sidebarThreadLocationId, "chats");
+  assert.equal(restored.state.sidebarProductModeAccountKey, "auth:apikey");
+  assert.equal(patchSource(result.source).status, "already-patched");
 });

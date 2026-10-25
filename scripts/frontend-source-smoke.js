@@ -15,9 +15,22 @@ function walk(node, visit) {
 }
 function verifyFrontendSource(assets) {
   const files = fs.readdirSync(assets).filter(name => name.endsWith(".js"));
-  const primary = files.filter(name => /^app-primary-/.test(name) && fs.readFileSync(path.join(assets, name), "utf8").includes("const __codexQuotaThreadProvider="));
-  assert.equal(primary.length, 1);
-  const source = fs.readFileSync(path.join(assets, primary[0]), "utf8"), ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const markers = ["const __codexQuotaThreadProvider=", "codex-rebuild-local-accent-presets:theme",
+    "Codex：API-key 首页使用官方记录器。", "CodexRebuildThreadTimeline", "CodexRebuildMcpStatusRefresh",
+    "CodexRebuildRemoteControlAuthIsolation", "CodexRebuildRemoteControlGateAuthIsolation",
+    "CodexRebuildServiceTierApiKeyRequest", "CodexRebuildSidebarUsage"];
+  const markedSources = new Map();
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(assets, name), "utf8");
+    if (markers.some(marker => text.includes(marker))) markedSources.set(name, text);
+  }
+  const markedSource = marker => {
+    const matches = [...markedSources.values()].filter(source => source.includes(marker));
+    assert.equal(matches.length, 1, `补丁标记必须唯一：${marker}`);
+    return matches[0];
+  };
+  // 编译器会移动组件；实际补丁标记和后续契约检查共同定位，不绑定 chunk 名称。
+  const source = markedSource("const __codexQuotaThreadProvider="), ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
   let guard, disabled, config, scope, quota = [], loading;
   walk(ast, node => {
     if (node.type === "VariableDeclaration" && node.declarations.some(d => d.id.name === "__codexUsesCustomProvider")) guard = node;
@@ -36,6 +49,17 @@ function verifyFrontendSource(assets) {
   });
   assert.equal(quota.length, 2); assert.ok(config && scope && loading);
   const lookup = guard.declarations[0].init;
+  // 新 Composer 通过导出初始化器读取跨模块会话 atom；执行生成表达式，保留初始化调用。
+  const providerRead = lookup.type === "SequenceExpression" ? lookup.expressions.at(-1) : lookup;
+  assert.equal(providerRead.type, "CallExpression");
+  assert.equal(providerRead.callee.type, "Identifier");
+  assert.equal(providerRead.arguments.length, 2);
+  const providerInitializers = lookup.type === "SequenceExpression" ? lookup.expressions.slice(0, -1) : [];
+  for (const initializer of providerInitializers) {
+    assert.equal(initializer.type, "CallExpression");
+    assert.equal(initializer.callee.type, "Identifier");
+    assert.equal(initializer.arguments.length, 0);
+  }
   const external = { base_url: "https://provider.example/v1", requires_openai_auth: true };
   const scenarios = [
     { name: "第三方服务不受官方额度禁发", provider: "local", endpoint: external, expected: false },
@@ -55,9 +79,12 @@ function verifyFrontendSource(assets) {
   const results = [];
   for (const scenario of scenarios) {
     const context = Object.fromEntries([...names].map(name => [name, false]));
+    let initialized = providerInitializers.length === 0;
+    for (const initializer of providerInitializers) context[initializer.callee.name] = () => { initialized = true; };
     Object.assign(context, { URL, [config]: { isConfigDataPending: !!scenario.pending, resolvedConfig: { model_provider: scenario.provider, model_providers: { local: scenario.endpoint } } },
       [scope]: { value: { kind: scenario.kind || "local", cloudThreadPrototype: scenario.cloud } }, [loading]: { isLoading: !!scenario.loading },
-      [lookup.callee.name]: () => scenario.saved, [lookup.arguments[0].name]: null, [lookup.arguments[1].name]: "fixture-thread" });
+      [providerRead.callee.name]: () => { assert.ok(initialized, "会话 Provider atom 必须先初始化"); return scenario.saved; },
+      [providerRead.arguments[0].name]: null, [providerRead.arguments[1].name]: "fixture-thread" });
     for (const name of quota) context[name] = true;
     const actual = vm.runInNewContext(source.slice(guard.start, guard.end) + `\nBoolean(${source.slice(disabled.init.start, disabled.init.end)})`, context, { timeout: 1000 });
     assert.equal(actual, scenario.expected, scenario.name); results.push(scenario.name);
@@ -70,16 +97,10 @@ function verifyFrontendSource(assets) {
   assert.match(settingsSource, /codex-rebuild-local-accent-presets:settings/);
   assert.match(settingsSource, /codex-rebuild-accent-presets\.js/);
   assert.match(settingsSource, /__codexSelectAccentPreset/);
-  const themeEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("codex-rebuild-local-accent-presets:theme"));
-  assert.equal(themeEntries.length, 1);
-  const themeSource = fs.readFileSync(path.join(assets, themeEntries[0]), "utf8");
+  const themeSource = markedSource("codex-rebuild-local-accent-presets:theme");
   assert.match(themeSource, /__codexResolveAccentPreset/);
   assert.match(themeSource, /accentSource:`chatgpt`/);
-  const navigationEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("Codex：API-key 首页使用官方记录器。"));
-  assert.equal(navigationEntries.length, 1);
-  const navigationSource = fs.readFileSync(path.join(assets, navigationEntries[0]), "utf8");
+  const navigationSource = markedSource("Codex：API-key 首页使用官方记录器。");
   const recorder = /\/\* Codex：API-key 首页使用官方记录器。 \*\/if\([A-Za-z_$][\w$]*===`apikey`\)\{([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*,\{accountKey:`auth:apikey`,auth:[A-Za-z_$][\w$]*,location:[A-Za-z_$][\w$]*,productMode:[A-Za-z_$][\w$]*\}\);return;\}/.exec(navigationSource);
   assert.ok(recorder, "API-key 首页必须调用结构完整的官方记录器");
   // 校验实际调用契约，不绑定压缩函数名；仍要求与原生五字段调用共用唯一记录器。
@@ -109,35 +130,28 @@ function verifyFrontendSource(assets) {
   assert.doesNotMatch(navigationSource, /Codex：API-key 首页恢复最近会话/);
   assert.doesNotMatch(navigationSource, /Codex：API-key 首页恢复写入/);
   assert.doesNotMatch(navigationSource, /authMethod:__codexAuthMethod/);
-  const timelineEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildThreadTimeline"));
-  assert.equal(timelineEntries.length, 1);
-  const timelineSource = fs.readFileSync(path.join(assets, timelineEntries[0]), "utf8");
+  const timelineSource = markedSource("CodexRebuildThreadTimeline");
   assert.match(timelineSource,
     /supportsThreadTimeline\(\)\{return\s*[A-Za-z_$][\w$]*\(this\.hostId,this\.requestClient\.getAppServerVersion\(\)\)\/\* CodexRebuildThreadTimeline \*\//);
-  const mcpRefreshEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildMcpStatusRefresh"));
-  assert.equal(mcpRefreshEntries.length, 1);
-  const mcpRefreshSource = fs.readFileSync(path.join(assets, mcpRefreshEntries[0]), "utf8");
+  const mcpRefreshSource = markedSource("CodexRebuildMcpStatusRefresh");
   assert.match(mcpRefreshSource, /toolsAndAuthOnly/);
   assert.match(mcpRefreshSource, /mention-discovery/);
   assert.match(mcpRefreshSource, /refetchType:`none`/);
   assert.match(mcpRefreshSource, /===`full`/);
   assert.match(mcpRefreshSource, /CodexRebuildMcpStatusRefresh \*\/\)\},250\)/);
-  const remoteControlEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildRemoteControlAuthIsolation"));
-  assert.equal(remoteControlEntries.length, 1);
-  const remoteControlSource = fs.readFileSync(path.join(assets, remoteControlEntries[0]), "utf8");
+  const remoteControlSource = markedSource("CodexRebuildRemoteControlAuthIsolation");
+  const remoteGateSource = markedSource("CodexRebuildRemoteControlGateAuthIsolation");
   assert.match(remoteControlSource, /__codexRemoteAccount\?\.authMethod!==`chatgpt`/);
-  assert.match(remoteControlSource, /__codexSetRemoteEnabled\(!1\)/);
-  assert.match(remoteControlSource, /CodexRebuildRemoteControlGateAuthIsolation/);
-  assert.match(remoteControlSource, /__codexRemoteGateAccount\?\.authMethod===`chatgpt`/);
-  assert.match(remoteControlSource, /__codexRemoteGateAccount\?\.authLoading/);
+  // 新版官方目录 atom 为只读派生值；旧版仍需清理可写存储，二者均校验认证隔离。
+  assert.equal(require("./patch-remote-control").patchSource(remoteControlSource).status, "already-patched");
+  if (!remoteControlSource.includes("CodexRebuildRemoteControlCatalog")) {
+    assert.match(remoteControlSource, /__codexSetRemoteEnabled\(!1\)/);
+  }
+  assert.match(remoteGateSource, /__codexRemoteGateAccount\?\.authMethod===`chatgpt`/);
+  assert.match(remoteGateSource, /__codexRemoteGateAccount\?\.authLoading/);
   assert.doesNotMatch(remoteControlSource, /codex-remote-gate:/);
-  const serviceTierEntries = files.filter(name => /^app-initial-/.test(name)
-    && fs.readFileSync(path.join(assets, name), "utf8").includes("CodexRebuildServiceTierApiKeyRequest"));
-  assert.equal(serviceTierEntries.length, 1);
-  const serviceTierSource = fs.readFileSync(path.join(assets, serviceTierEntries[0]), "utf8");
+  assert.doesNotMatch(remoteGateSource, /codex-remote-gate:/);
+  const serviceTierSource = markedSource("CodexRebuildServiceTierApiKeyRequest");
   assert.match(serviceTierSource, /CodexRebuildServiceTierApiKeyAuth/);
   assert.match(serviceTierSource, /CodexRebuildServiceTierApiKeyAccess/);
   assert.match(serviceTierSource, /\{fast:!0,ultrafast:!0\}\/\* CodexRebuildServiceTierApiKeyRequest \*\//);
@@ -164,7 +178,11 @@ function verifyFrontendSource(assets) {
   assert.equal(require("./patch-hide-invite-menu").patchSource(
     fs.readFileSync(path.join(assets, inviteMenus[0]), "utf8")).status, "already-patched");
   const usagePatch = require("./patch-sidebar-usage");
-  assert.equal(usagePatch.patchSource(mcpRefreshSource).status, "already-patched");
+  const usageDependencies = files.filter(name => /^app-initial-.*\.js$/.test(name))
+    .map(name => ({ name, source: fs.readFileSync(path.join(assets, name), "utf8") }));
+  assert.equal(usagePatch.patchSource(markedSource("CodexRebuildSidebarUsage"), {
+    relatedSources: usageDependencies,
+  }).status, "already-patched");
   assert.equal(fs.readFileSync(path.join(assets, usagePatch.MODULE), "utf8"),
     fs.readFileSync(path.join(__dirname, "runtime", "sidebar-usage.mjs"), "utf8"));
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);

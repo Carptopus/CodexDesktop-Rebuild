@@ -344,10 +344,10 @@ function findActiveDestinationTracker(ast, source) {
     if (!marker && !sharedAuth) continue;
     candidates.push(details);
   }
-  if (candidates.length !== 1) {
+  if (candidates.length > 1) {
     throw new Error(`首页活动目标跟踪器 数量异常（${candidates.length}）`);
   }
-  return candidates[0];
+  return candidates[0] ?? null;
 }
 
 function usesSharedAuth(callback, auth) {
@@ -384,6 +384,12 @@ function patchSource(source) {
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const tracker = findActiveDestinationTracker(ast, source);
+    if (tracker == null) {
+      if ([MARKER, HOME_CURRENT_MARKER, HOME_STATE_MARKER, HOME_RESTORE_MARKER]
+        .some(marker => source.includes(marker))) throw new Error("补丁标记存在但首页活动目标跟踪器缺失");
+      // 多个 chunk 会共享账户字段；只有完整原生记录调用所在文件才是补丁目标。
+      return { status: "not-applicable", source };
+    }
     const homeRestore = findHomeRestore(ast, source);
     if (tracker == null || homeRestore == null) {
       if (source.includes(MARKER) || source.includes(HOME_CURRENT_MARKER)) {

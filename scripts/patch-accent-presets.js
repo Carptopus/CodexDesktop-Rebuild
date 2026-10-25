@@ -142,6 +142,15 @@ function findTarget(directory, pattern, content, label) {
   return candidates[0];
 }
 
+function findThemeTarget(directory) {
+  const signature = ["--color-background-user-message", "--color-image-generation-accent", "accentSource"];
+  const candidates = fs.readdirSync(directory).filter(name => name.endsWith(".js"))
+    .map(name => ({ name, path: path.join(directory, name), source: fs.readFileSync(path.join(directory, name), "utf8") }))
+    .filter(file => signature.every(value => file.source.includes(value)));
+  if (candidates.length !== 1) throw new Error(`强调色主题资源数量异常（${candidates.length}）`);
+  return candidates[0];
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find(arg => PLATFORMS.includes(arg));
@@ -153,8 +162,7 @@ function main() {
     try {
       const settings = findTarget(directory.path, /^general-settings-.*\.js$/,
         ["chatgptAccentPicker.ChatGptAccentPicker.updateError"], "强调色设置");
-      const theme = findTarget(directory.path, /^app-initial-.*\.js$/,
-        ["--color-background-user-message", "--color-image-generation-accent", "accentSource"], "强调色主题");
+      const theme = findThemeTarget(directory.path);
       const settingsResult = patchSettingsSource(settings.source);
       const themeResult = patchThemeSource(theme.source);
       for (const [label, result] of [["强调色设置", settingsResult], ["强调色主题", themeResult]]) {
@@ -184,4 +192,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { MODULE, SETTINGS_MARKER, THEME_MARKER, patchSettingsSource, patchThemeSource };
+module.exports = { MODULE, SETTINGS_MARKER, THEME_MARKER, findThemeTarget, patchSettingsSource, patchThemeSource };

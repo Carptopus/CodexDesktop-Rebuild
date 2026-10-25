@@ -50,7 +50,7 @@ function targetCase(ast) {
   return branch;
 }
 
-function analyzeOriginal(source, branch) {
+function analyzeOriginal(source, branch, ast) {
   const expression = branch.consequent[0].expression;
   if (expression.type !== "SequenceExpression" || expression.expressions.length !== 2) {
     throw new Error("MCP 启动状态刷新表达式结构异常");
@@ -69,7 +69,21 @@ function analyzeOriginal(source, branch) {
     throw new Error("MCP global 状态条件结构异常");
   }
 
-  const scheduled = readyRefresh.consequent;
+  let scheduled = readyRefresh.consequent;
+  let pending = "";
+  let callbackPrefix = "";
+  let inventoryRefresh = "";
+  let inventoryOwner;
+  if (scheduled.type === "SequenceExpression" && scheduled.expressions.length === 2) {
+    const accumulation = scheduled.expressions[0];
+    if (accumulation.type !== "AssignmentExpression" || accumulation.operator !== "||=" ||
+        accumulation.left.type !== "Identifier" || accumulation.right.type !== "CallExpression" ||
+        source.slice(accumulation.right.arguments[0]?.start, accumulation.right.arguments[0]?.end) !== `${notification}.params.name`) {
+      throw new Error("MCP inventory 累积结构异常");
+    }
+    pending = source.slice(accumulation.start, accumulation.end);
+    scheduled = scheduled.expressions[1];
+  }
   if (scheduled.type !== "AssignmentExpression" || scheduled.operator !== "??=" ||
       scheduled.left.type !== "Identifier" || scheduled.right.type !== "CallExpression" ||
       scheduled.right.callee.type !== "Identifier" || scheduled.right.callee.name !== "setTimeout" ||
@@ -78,11 +92,34 @@ function analyzeOriginal(source, branch) {
   }
   const timer = scheduled.left.name;
   const callback = scheduled.right.arguments[0];
-  const bodyExpression = callback?.type === "ArrowFunctionExpression" &&
+  let bodyExpression = callback?.type === "ArrowFunctionExpression" &&
     callback.body.type === "BlockStatement" && callback.body.body.length === 1 &&
     callback.body.body[0].type === "ExpressionStatement"
     ? callback.body.body[0].expression
     : null;
+  if (pending && callback?.body?.body.length === 3) {
+    const [resetTimer, capture, work] = callback.body.body;
+    const captured = capture.type === "VariableDeclaration" && capture.declarations.length === 1
+      ? capture.declarations[0] : null;
+    const sequence = work.type === "ExpressionStatement" ? work.expression : null;
+    const clear = sequence?.type === "SequenceExpression" && sequence.expressions.length === 2
+      ? sequence.expressions[0] : null;
+    if (resetTimer.type !== "ExpressionStatement" || captured?.id.type !== "Identifier" ||
+        captured.init?.type !== "Identifier" || !pending.startsWith(`${captured.init.name}||=`) ||
+        clear?.type !== "AssignmentExpression" || clear.left.name !== captured.init.name ||
+        source.slice(clear.right.start, clear.right.end) !== "!1") {
+      throw new Error("MCP inventory 回调捕获结构异常");
+    }
+    callbackPrefix = `${source.slice(capture.start, capture.end)}${source.slice(clear.start, clear.end)},`;
+    bodyExpression = { type: "SequenceExpression", expressions: [resetTimer.expression, sequence.expressions[1]] };
+    const calls = sequence.expressions[1]?.right?.expressions;
+    const inventory = calls?.length === 3 ? calls[1] : null;
+    if (inventory?.type !== "CallExpression" || inventory.arguments.length !== 1 ||
+        inventory.arguments[0].name !== captured.id.name) {
+      throw new Error("MCP inventory 回调调用结构异常");
+    }
+    inventoryRefresh = source.slice(inventory.start, inventory.end);
+  }
   if (bodyExpression?.type !== "SequenceExpression" || bodyExpression.expressions.length !== 2) {
     throw new Error("MCP 轻量刷新回调结构异常");
   }
@@ -92,12 +129,13 @@ function analyzeOriginal(source, branch) {
       guarded.type !== "LogicalExpression" || guarded.operator !== "&&" ||
       guarded.left?.type !== "LogicalExpression" || guarded.left.operator !== "&&" ||
       guarded.left.left?.type !== "Identifier" || guarded.right?.type !== "SequenceExpression" ||
-      guarded.right.expressions.length !== 2) {
+      guarded.right.expressions.length !== (pending ? 3 : 2)) {
     throw new Error("MCP 轻量刷新守卫结构异常");
   }
   const active = guarded.left.left.name;
   const guard = source.slice(guarded.left.right.start, guarded.left.right.end);
-  const [toolsCall, mentionCall] = guarded.right.expressions;
+  const toolsCall = guarded.right.expressions[0];
+  const mentionCall = guarded.right.expressions.at(-1);
   const toolsText = source.slice(toolsCall.start, toolsCall.end);
   const mentionText = source.slice(mentionCall.start, mentionCall.end);
   if (!toolsText.includes("toolsAndAuthOnly") || !mentionText.includes("mention-discovery")) {
@@ -117,8 +155,35 @@ function analyzeOriginal(source, branch) {
   const host = queryKey.elements[1].name;
 
   const installedText = source.slice(readyRefresh.alternate.start, readyRefresh.alternate.end);
-  if (!installedText.includes("installed-inventory") || !installedText.includes("installed")) {
+  if (!pending && (!installedText.includes("installed-inventory") || !installedText.includes("installed"))) {
     throw new Error("MCP installed inventory 刷新结构异常");
+  }
+  if (pending) {
+    const original = readyRefresh.alternate;
+    const installedCall = original.type === "LogicalExpression" ? original.right : null;
+    const pendingCall = readyRefresh.consequent.expressions[0].right;
+    if (installedCall?.type !== "CallExpression" || installedCall.callee.name !==
+        guarded.right.expressions[1].callee.name || installedCall.arguments.length !== 1 ||
+        source.slice(installedCall.arguments[0].start, installedCall.arguments[0].end) !==
+        source.slice(pendingCall.start, pendingCall.end)) {
+      throw new Error("MCP installed inventory helper 调用结构异常");
+    }
+    const enclosing = [];
+    walk(ast, node => {
+      if (node.type === "FunctionDeclaration" && node.start < branch.start && node.end > branch.end) enclosing.push(node);
+    });
+    const owner = enclosing.sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    inventoryOwner = owner;
+    const helpers = [];
+    if (owner) walk(owner, node => {
+      if (node.type === "VariableDeclarator" && node.id.name === installedCall.callee.name &&
+          node.init?.type === "ArrowFunctionExpression") helpers.push(node);
+    }, { ownScope: true });
+    const helperText = helpers.length === 1 ? source.slice(helpers[0].start, helpers[0].end) : "";
+    if (!["installed-inventory", "installed", `${queryClient}`].every(term => helperText.includes(term)) ||
+        !helperText.includes(`[2]===${host}`)) {
+      throw new Error("MCP installed inventory helper 定义结构异常");
+    }
   }
   const blanket = source.slice(scopedRefresh.consequent.start, scopedRefresh.consequent.end);
   if (!blanket.includes(`queryKey:[...${queryBase},${host}]`) || blanket.includes("refetchType")) {
@@ -144,6 +209,10 @@ function analyzeOriginal(source, branch) {
     globalText,
     installedText,
     threadRefresh,
+    pending,
+    callbackPrefix,
+    inventoryRefresh,
+    inventoryOwner,
   };
 }
 
@@ -190,12 +259,20 @@ function patchSource(source) {
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const branch = targetCase(ast);
-    const shape = analyzeOriginal(source, branch);
+    const shape = analyzeOriginal(source, branch, ast);
+    if (shape.pending && source.includes("__codexMcpThreadReadyPending")) {
+      throw new Error("MCP thread-ready pending binding 已存在但缺少补丁标记");
+    }
     const fullStale = `${shape.queryClient}.invalidateQueries({queryKey:[...${shape.queryBase},${shape.host}],predicate:({queryKey:e})=>e.length===${shape.queryBase}.length+2&&e[${shape.queryBase}.length+1]===\`full\`,refetchType:\`none\`})${MARKER}`;
-    const schedule = `${shape.timer}??=setTimeout(()=>{${shape.timer}=void 0,${shape.active}&&(${shape.guard})&&(${shape.toolsText},${shape.mentionText},${fullStale})},${REFRESH_DELAY_MS})`;
+    const inventoryCapture = shape.pending ? "let __codexMcpRefreshInventory=__codexMcpThreadReadyPending;__codexMcpThreadReadyPending=!1;" : "";
+    const schedule = `${shape.pending ? `${shape.readyText}&&(__codexMcpThreadReadyPending=!0,${shape.pending}),` : ""}${shape.timer}??=setTimeout(()=>{${shape.timer}=void 0;${inventoryCapture}${shape.callbackPrefix}${shape.active}&&(${shape.guard})&&(${shape.toolsText},${shape.inventoryRefresh ? `__codexMcpRefreshInventory&&${shape.inventoryRefresh},` : ""}${shape.mentionText},${fullStale})},${REFRESH_DELAY_MS})`;
     const globalOnly = `${shape.notification}.params.threadId==null&&(${shape.installedText})`;
     const replacement = `(${shape.readyText}||${shape.globalText})&&(${schedule}),${globalOnly},${shape.threadRefresh}`;
-    const next = source.slice(0, shape.expression.start) + replacement + source.slice(shape.expression.end);
+    let next = source.slice(0, shape.expression.start) + replacement + source.slice(shape.expression.end);
+    if (shape.inventoryOwner) {
+      const start = shape.inventoryOwner.body.start + 1;
+      next = next.slice(0, start) + "let __codexMcpThreadReadyPending=!1;" + next.slice(start);
+    }
     validatePatchedSource(next);
     return { status: "patched", source: next };
   } catch (error) {
@@ -221,7 +298,7 @@ function main() {
   for (const directory of directories) {
     try {
       const results = fs.readdirSync(directory.path)
-        .filter((name) => /^app-initial-.*\.js$/.test(name))
+        .filter((name) => name.endsWith(".js"))
         .map((name) => ({ name, path: path.join(directory.path, name) }))
         .map((file) => ({ ...file, source: fs.readFileSync(file.path, "utf8") }))
         .map((file) => ({ file, result: patchSource(file.source) }))

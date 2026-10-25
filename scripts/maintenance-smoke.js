@@ -78,7 +78,19 @@ try {
     const patched = fs.readFileSync(entry);
     run("patch-test-isolation.js", ["win"], 0, { CODEX_PATCH_SOURCE_DIR: source });
     assert.deepEqual(fs.readFileSync(entry), patched);
-    const started = spawnSync(process.execPath, [entry], { encoding: "utf8", env: { ...process.env, CODEX_REBUILD_TEST_ROOT: testRoot } });
+    if (mode === "commonjs") {
+      run("patch-crash-forensics.js", ["win", "--check"], 0, { CODEX_PATCH_SOURCE_DIR: source });
+      assert.deepEqual(fs.readFileSync(entry), patched);
+      run("patch-crash-forensics.js", ["win"], 0, { CODEX_PATCH_SOURCE_DIR: source });
+      const combined = fs.readFileSync(entry);
+      assert.ok(combined.indexOf('require("./codex-rebuild-test-environment.cjs")') < combined.indexOf("__CODEX_CRASH_FORENSICS_V4__"));
+      run("patch-test-isolation.js", ["win", "--check"], 0, { CODEX_PATCH_SOURCE_DIR: source });
+      run("patch-crash-forensics.js", ["win"], 0, { CODEX_PATCH_SOURCE_DIR: source });
+      assert.deepEqual(fs.readFileSync(entry), combined, "隔离与诊断组合重复应用不能继续改写入口");
+      checks++;
+    }
+    const started = spawnSync(process.execPath, [entry], { encoding: "utf8", env: { ...process.env, CODEX_REBUILD_TEST_ROOT: testRoot,
+      LOCALAPPDATA: path.join(testRoot, "diagnostics") } });
     assert.equal(started.status, 0, started.stderr);
     const proof = JSON.parse(fs.readFileSync(path.join(testRoot, "isolation-runtime.json")));
     assert.equal(proof.codexHome, path.join(testRoot, "codex-home"));
@@ -105,6 +117,15 @@ try {
   const evidenceOutput = path.join(temporary, "evidence-output");
   write(path.join(evidenceAsar, ".vite", "build", "early-bootstrap.js"), "const startup=true;");
   write(path.join(evidenceAsar, "webview", "assets", "app.js"), "const app=true;");
+  const frontendEvidence = [
+    ["app-shared-fixture.js", "const sharedDefinitions=true;"],
+    ["composer-content-fixture.js", "const composer={isConfigDataPending:false};"],
+    ["remote-control-fixture.js", "const event='set-remote-control-connections-enabled';"],
+    ["app-theme-fixture.js", "const theme={'--color-image-generation-accent':'blue'};"],
+  ];
+  for (const [name, source] of frontendEvidence) {
+    write(path.join(evidenceAsar, "webview", "assets", name), source);
+  }
   const browserService = [
     'const gate="codex_browser_use_agent_request_header";',
     "async function read(){try{return await feature(gate)}catch{return!1}}",
@@ -125,6 +146,14 @@ try {
   }
   saveCompatibilityEvidence(evidenceAsar, { version: "fixture" }, evidenceOutput);
   const evidenceIndex = JSON.parse(fs.readFileSync(path.join(evidenceOutput, "index.json"), "utf8"));
+  for (const [name, source] of frontendEvidence) {
+    const entry = evidenceIndex.files.find(file => file.name === name);
+    assert.equal(entry?.copied, true, `缺少新版独立功能块取证：${name}`);
+    const copied = fs.readFileSync(path.join(evidenceOutput, "webview", name), "utf8");
+    assert.equal(copied, source);
+    assert.equal(entry.sha256, hash(copied));
+  }
+  checks++;
   const browserEvidence = evidenceIndex.files.filter((item) => item.name === "browser-service.mjs");
   assert.equal(browserEvidence.length, 2);
   assert(browserEvidence.every((item) => item.copied));

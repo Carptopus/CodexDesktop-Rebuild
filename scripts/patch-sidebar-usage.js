@@ -15,7 +15,22 @@ const props = node => Object.fromEntries((node?.properties ?? [])
   .filter(property => property.type === "Property" && !property.computed)
   .map(property => [key(property.key), property.value]));
 
-function analyze(source, ast) {
+function isSidebarSignature(source) {
+  const markers = ["codex.profileFooter.settingsFallback", "codex.profileFooter.loadingProfile", "sidebarFooter", "hideUsage"];
+  if (!markers.every(marker => source.includes(marker))) return false;
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  return ast.body.some(node => node.type === "FunctionDeclaration" && markers.every(marker =>
+    source.slice(node.start, node.end).includes(marker)));
+}
+
+function findSidebarTarget(directory) {
+  const candidates = fs.readdirSync(directory).filter(name => name.endsWith(".js"))
+    .map(name => ({ name, path: path.join(directory, name), source: fs.readFileSync(path.join(directory, name), "utf8") }))
+    .filter(file => isSidebarSignature(file.source));
+  return unique(candidates, "原生头像侧栏资源");
+}
+
+function analyze(source, ast, relatedSources = []) {
   const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
     contains(source, node, "codex.profileFooter.settingsFallback") &&
     contains(source, node, "codex.profileFooter.loadingProfile")), "原生头像侧栏组件");
@@ -53,20 +68,58 @@ function analyze(source, ast) {
   if (jsx?.type !== "MemberExpression" || jsx.object.type !== "Identifier" || key(jsx.property) !== "jsx") {
     throw new Error("原生侧栏 JSX 结构未知");
   }
-  const usageFetch = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
-    nodes(node, child => literal(child) === "/wham/usage").length > 0), "官方额度请求");
-  const usageAtom = unique(nodes(ast, node => node.type === "AssignmentExpression" &&
-    node.operator === "=" && node.left.type === "Identifier" && node.right.type === "CallExpression" &&
-    node.right.arguments.some(argument => {
-      if (argument.type !== "ArrowFunctionExpression") return false;
-      const returned = argument.body.type === "BlockStatement" ? argument.body.body.at(-1) : null;
-      const options = props(returned?.type === "ReturnStatement" ? returned.argument : argument.body);
-      return options.refetchInterval && options.queryFn && nodes(options.queryFn, call =>
-        call.type === "CallExpression" && call.callee.type === "Identifier" &&
-        call.callee.name === usageFetch.id.name).length > 0;
-    })), "共享额度查询");
-  const initialize = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
-    node.start < usageAtom.start && node.end > usageAtom.end), "额度查询初始化器");
+  let usageAtom, initialize;
+  const usageFetch = ast.body.filter(node => node.type === "FunctionDeclaration" &&
+    nodes(node, child => literal(child) === "/wham/usage").length > 0);
+  if (usageFetch.length) {
+    const fetch = unique(usageFetch, "官方额度请求");
+    usageAtom = unique(nodes(ast, node => node.type === "AssignmentExpression" &&
+      node.operator === "=" && node.left.type === "Identifier" && node.right.type === "CallExpression" &&
+      node.right.arguments.some(argument => {
+        if (argument.type !== "ArrowFunctionExpression") return false;
+        const returned = argument.body.type === "BlockStatement" ? argument.body.body.at(-1) : null;
+        const options = props(returned?.type === "ReturnStatement" ? returned.argument : argument.body);
+        return options.refetchInterval && options.queryFn && nodes(options.queryFn, call =>
+          call.type === "CallExpression" && call.callee.type === "Identifier" &&
+          call.callee.name === fetch.id.name).length > 0;
+      })), "共享额度查询");
+    initialize = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
+      node.start < usageAtom.start && node.end > usageAtom.end), "额度查询初始化器");
+  } else {
+    const linked = relatedSources.map(related => {
+      const relatedAst = parse(related.source, { ecmaVersion: "latest", sourceType: "module" });
+      const fetch = unique(relatedAst.body.filter(node => node.type === "FunctionDeclaration" &&
+        nodes(node, child => literal(child) === "/wham/usage").length > 0), "共享官方额度请求");
+      const assignments = nodes(relatedAst, node => node.type === "AssignmentExpression" &&
+        node.operator === "=" && node.left.type === "Identifier" && node.right.type === "CallExpression" &&
+        node.right.arguments.some(argument => {
+          if (argument.type !== "ArrowFunctionExpression") return false;
+          const returned = argument.body.type === "BlockStatement" ? argument.body.body.at(-1) : null;
+          const options = props(returned?.type === "ReturnStatement" ? returned.argument : argument.body);
+          return options.refetchInterval && options.queryFn && nodes(options.queryFn, call =>
+            call.type === "CallExpression" && call.callee.type === "Identifier" &&
+            call.callee.name === fetch.id.name).length > 0;
+        }));
+      const atom = unique(assignments, "共享账户额度 Atom");
+      const initializer = unique(relatedAst.body.filter(node => node.type === "FunctionDeclaration" &&
+        node.start < atom.start && node.end > atom.end), "共享账户额度初始化器");
+      const exported = name => unique(relatedAst.body.flatMap(node => node.type === "ExportNamedDeclaration"
+        ? (node.specifiers ?? []).filter(specifier => specifier.local.name === name).map(specifier => specifier.exported.name) : []),
+      `额度导出 ${name}`);
+      const atomExport = exported(atom.left.name), initExport = exported(initializer.id.name);
+      const filename = path.basename(related.name);
+      const importDeclaration = unique(ast.body.filter(node => node.type === "ImportDeclaration" &&
+        path.basename(node.source.value) === filename &&
+        node.specifiers.some(specifier => specifier.imported?.name === atomExport) &&
+        node.specifiers.some(specifier => specifier.imported?.name === initExport)), "账户额度导入链");
+      const importedLocal = name => unique(importDeclaration.specifiers.filter(specifier =>
+        specifier.imported?.name === name).map(specifier => specifier.local.name), `账户额度本地绑定 ${name}`);
+      return { atom: importedLocal(atomExport), initialize: importedLocal(initExport) };
+    });
+    const binding = unique(linked, "共享账户额度来源");
+    usageAtom = { left: { name: binding.atom } };
+    initialize = { id: { name: binding.initialize } };
+  }
   const avatar = unique(nodes(footer, node => node.type === "CallExpression" &&
     node.arguments[1]?.type === "ObjectExpression" &&
     ["colorKey", "name", "size", "src", "fallback", "loadingFallback"].every(name => props(node.arguments[1])[name])), "原生头像");
@@ -84,7 +137,7 @@ function analyze(source, ast) {
     usageAtom: usageAtom.left.name, initialize: initialize.id.name };
 }
 
-function patchSource(source) {
+function patchSource(source, { relatedSources = [] } = {}) {
   if (!source.includes("codex.profileFooter.settingsFallback")) return { status: "not-applicable", source };
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -99,7 +152,7 @@ function patchSource(source) {
     if ([COMPONENT, ACCOUNT_COMPONENT, RENDER, MODULE].some(value => source.includes(value))) {
       throw new Error("侧栏额度注入名称已占用");
     }
-    const shape = analyze(source, ast);
+    const shape = analyze(source, ast, relatedSources);
     const call = `(0,${shape.jsx}.jsx)(${COMPONENT},{fallback:${shape.avatarSlot.init.name},compact:${shape.compact},hidden:${shape.hidden}})`;
     const bridges = `\n${MARKER}\nfunction ${COMPONENT}(props){const auth=${shape.authHook}();return props.hidden||auth.authMethod!==\`chatgpt\`?props.fallback:(0,${shape.jsx}.jsx)(${ACCOUNT_COMPONENT},props);}\n`
       + `function ${ACCOUNT_COMPONENT}(props){${shape.initialize}();const auth=${shape.authHook}(),usage=${shape.readHook}(${shape.usageAtom}),intl=${shape.intlHook}();return ${RENDER}({...props,auth,usage:usage.data,intl,jsx:${shape.jsx}});}\n`;
@@ -119,8 +172,14 @@ function main() {
   for (const name of platform ? [platform] : ["win", "mac-arm64", "mac-x64"]) {
     const directory = path.join(SRC_DIR, name, "_asar", "webview", "assets");
     if (!platform && !fs.existsSync(directory)) continue;
-    const file = unique(fs.readdirSync(directory).filter(file => /^app-initial-.*\.js$/.test(file)), "侧栏资源");
-    const target = path.join(directory, file), result = patchSource(fs.readFileSync(target, "utf8"));
+    const targetFile = findSidebarTarget(directory);
+    const target = targetFile.path;
+    let relatedSources = [];
+    if (!targetFile.source.includes("/wham/usage")) {
+      const initial = unique(fs.readdirSync(directory).filter(file => /^app-initial-.*\.js$/.test(file)), "官方账户额度资源");
+      relatedSources = [{ name: initial, source: fs.readFileSync(path.join(directory, initial), "utf8") }];
+    }
+    const result = patchSource(targetFile.source, { relatedSources });
     if (!["patched", "already-patched"].includes(result.status)) throw new Error(result.reason ?? result.status);
     if (!check) {
       if (result.status === "patched") fs.writeFileSync(target, result.source, "utf8");
@@ -132,4 +191,4 @@ function main() {
   if (!count) throw new Error("缺少侧栏额度目标资源");
 }
 if (require.main === module) main();
-module.exports = { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, patchSource };
+module.exports = { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, isSidebarSignature, patchSource };

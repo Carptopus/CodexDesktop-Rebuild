@@ -135,27 +135,35 @@ function saveCompatibilityEvidence(
   const signatures = ["shouldIncludeUpdater", "shouldIncludeWindowsUpdater", "shouldIncludeWindowsMsixUpdater",
     "FlyoutSubmenuItem", "flyoutHeader", "data-model-picker-model-row", "data-model-picker-view", "modelListConfig",
     "serviceTierAccess", "Failed to read service tier for request"];
+  const functionalSignatures = ["mcpServer/startupStatus/updated", "mention-discovery",
+    "Failed to sync local remote control enablement", "set-remote-control-connections-enabled",
+    "remote-connections/gate-bridge", "isConfigDataPending", "codex.profileFooter.settingsFallback",
+    "chatgptAccentPicker.ChatGptAccentPicker.updateError", "--color-image-generation-accent"];
   const files = [];
   for (const [label, directory] of [["main", ".vite/build"], ["webview", "webview/assets"]]) {
     const sourceDirectory = path.join(asarRoot, directory);
     for (const name of fs.readdirSync(sourceDirectory).filter((name) => /\.(?:js|css)$/.test(name))) {
       const file = path.join(sourceDirectory, name);
       const text = fs.readFileSync(file, "utf8");
-      const matches = [...signatures, "settings.appearance.visualStyle", "--thread-content-expanded-max-width", "--markdown-wide-block-max-width"]
+      const matches = [...signatures, ...functionalSignatures, "settings.appearance.visualStyle", "--thread-content-expanded-max-width", "--markdown-wide-block-max-width"]
         .filter((signature) => text.includes(signature));
       const startupEvidence = label === "main" && /^(?:early-bootstrap|startup-requirements|application-network-startup)/.test(name);
-      if (!matches.length && !startupEvidence) continue;
+      // 新版会在三个入口 chunk 之间移动实现；诊断必须包含共享定义与实际功能块。
+      const frontendEvidence = label === "webview" &&
+        (/^app-(?:initial|primary|shared)-.*\.js$/.test(name) ||
+          name.endsWith(".js") && matches.some(match => functionalSignatures.includes(match)));
+      if (!matches.length && !startupEvidence && !frontendEvidence) continue;
       const copied = label === "main" ? require("./patch-updater").auditUpdaterSource(text).length > 0
         : matches.includes("flyoutHeader") || matches.includes("data-model-picker-model-row")
           || matches.includes("data-model-picker-view") && matches.includes("modelListConfig");
       const serviceTierEvidence = matches.includes("serviceTierAccess") &&
         matches.includes("Failed to read service tier for request");
       const readingEvidence = matches.includes("settings.appearance.visualStyle") || name.endsWith(".css") && matches.some(match => match.startsWith("--"));
-      if (copied || serviceTierEvidence || readingEvidence || startupEvidence) {
+      if (copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence) {
         fs.mkdirSync(path.join(destination, label), { recursive: true });
         fs.copyFileSync(file, path.join(destination, label, name));
       }
-      files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
+      files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
     }
   }
 

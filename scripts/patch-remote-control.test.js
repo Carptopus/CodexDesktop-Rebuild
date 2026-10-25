@@ -52,6 +52,65 @@ test("没有 Remote Control 同步组件时不适用", () => {
   assert.equal(patchSource("const value=1;").status, "not-applicable");
 });
 
+test("catalog 模式要求 enabled selector、完整认证 atom 及初始化器的真实导入", () => {
+  const source = 'import{catalog as enabledAtom,account as currentAccount,initialize as initAuth}from"./app-initial-fixture.js";' +
+    fixture().replace('[n]=shared(`local_remote_control_enabled`)', 'n=useAtom(enabledAtom)');
+  const dependency = "var enabled,account;function init(){enabled=select(({get:e})=>e(catalog)?.localRemoteControlEnabled),account=atom(()=>({accountLoading:true,authLoading:true,authMethod:null,authenticatedAccountId:null,hasChatGptToken:null,requiresAuth:true,supportedSurface:null}))}export{enabled as catalog,account,init as initialize};";
+  const result = patchSource(source, { resolveModule: () => dependency });
+  assert.equal(result.status, "patched", result.reason);
+  assert.equal(patchSource(result.source).status, "already-patched");
+  assert.equal(patchSource(source).status, "unexpected-shape");
+  assert.equal(patchSource(source, { resolveModule: () => dependency.replace("localRemoteControlEnabled", "otherEnabled") }).status, "unexpected-shape");
+  assert.equal(patchSource(source, { resolveModule: () => dependency.replace("account,init as", "other as account,init as") }).status, "unexpected-shape");
+});
+
+test("执行生成组件验证认证加载、存储清理及两个 Remote Control 同步入口", async () => {
+  const result = patchSource(fixture());
+  assert.equal(result.status, "patched", result.reason);
+  const { parse } = require("acorn");
+  const vm = require("node:vm");
+  const functions = parse(result.source, { ecmaVersion: "latest", sourceType: "module" }).body
+    .filter(node => node.type === "FunctionDeclaration" && ["remoteSync", "gateBridge"].includes(node.id.name));
+  assert.equal(functions.length, 2);
+  const events = [], container = {};
+  let account, enabled, gateLoading = false, remoteGate = true, pairingGate = true;
+  const context = vm.createContext({
+    get: () => container, Container: {}, accountAtom: {}, useAtom: () => account,
+    shared: () => [enabled, value => { enabled = value; events.push(["storage", value]); }],
+    sync: async (target, value) => { assert.equal(target, container); events.push(["sync", value]); },
+    react: { useEffect: effect => effect() }, oneToOneGate: "pairing",
+    useGates: () => ({ isLoading: gateLoading, checkGate: gate => gate === "pairing" ? pairingGate : remoteGate }),
+    ipc: async (method, value) => events.push([method, JSON.parse(JSON.stringify(value.params))]),
+  });
+  vm.runInContext(functions.map(node => result.source.slice(node.start, node.end)).join(";"), context);
+  for (const authMethod of ["apikey", "chatgpt", "copilot"]) {
+    enabled = true;
+    events.length = 0;
+    account = { authMethod, authLoading: true };
+    context.remoteSync(); context.gateBridge();
+    assert.deepEqual(events, [], "认证加载期间不能同步或清理存储");
+    account.authLoading = false;
+    context.remoteSync(); context.gateBridge();
+    await Promise.resolve();
+    const chatgpt = authMethod === "chatgpt";
+    assert.deepEqual(events, [
+      ...chatgpt ? [] : [["storage", false]], ["sync", chatgpt],
+      ["set-remote-control-connections-enabled", { enabled: chatgpt, oneToOnePairingInAppEnabled: chatgpt }],
+    ]);
+  }
+  events.length = 0;
+  account = { authMethod: "chatgpt", authLoading: false };
+  remoteGate = false; pairingGate = false;
+  context.gateBridge();
+  assert.deepEqual(events.at(-1), ["set-remote-control-connections-enabled", {
+    enabled: false, oneToOnePairingInAppEnabled: false,
+  }], "ChatGPT 仍遵循官方 gate，不能被强制开启");
+  events.length = 0;
+  gateLoading = true;
+  context.gateBridge();
+  assert.deepEqual(events, [], "gate 加载期间不提前发送状态");
+});
+
 test("26.1016 真实 Bundle 的 Remote Control 认证切换行为", { skip: !process.env.CODEX_REBUILD_1016_BUNDLE }, async () => {
   const fs = require("node:fs");
   const vm = require("node:vm");
@@ -93,4 +152,53 @@ test("26.1016 真实 Bundle 的 Remote Control 认证切换行为", { skip: !pro
       ["set-remote-control-connections-enabled", { enabled: chatgpt, oneToOnePairingInAppEnabled: chatgpt }],
     ]);
   }
+});
+
+test("26.1021 真实 catalog 与 native Remote Control 认证切换", { skip: !process.env.CODEX_REBUILD_1021_BUNDLE }, async () => {
+  const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
+  const { parse } = require("acorn");
+  let file = process.env.CODEX_REBUILD_1021_BUNDLE;
+  if (fs.statSync(file).isDirectory()) {
+    const names = fs.readdirSync(file).filter(name => /^app-runtime-.*\.js$/.test(name));
+    assert.equal(names.length, 1); file = path.join(file, names[0]);
+  }
+  const source = fs.readFileSync(file, "utf8");
+  const options = { resolveModule: name => fs.readFileSync(path.join(path.dirname(file), name), "utf8") };
+  const result = patchSource(source, options);
+  assert.equal(result.status, "patched", result.reason);
+  assert.equal(patchSource(result.source).status, "already-patched");
+  assert.equal(patchSource(source).status, "unexpected-shape", "缺少依赖必须拒绝认证推断");
+  assert.match(result.source, /CodexRebuildRemoteControlCatalog/);
+  assert.match(result.source, /function TU\(\).*__codexRemoteAuthInit\(\),/);
+  assert.match(result.source, /function jU\(\).*__codexRemoteAuthInit\(\),/);
+  assert.doesNotMatch(result.source, /__codexSetRemoteEnabled/);
+  assert.equal(patchSource(result.source.replace("WE(t,!1)", "WE(t,!0)")).status,
+    "unexpected-shape", "已有 catalog 标记不能掩盖非 ChatGPT enable 污染");
+  const functions = parse(result.source, { ecmaVersion: "latest", sourceType: "module" }).body
+    .filter(node => node.type === "FunctionDeclaration" && ["SU", "DU"].includes(node.id.name));
+  assert.equal(functions.length, 2);
+  const events = [], container = {}, catalogAtom = {}, accountAtom = {};
+  let account, enabled = true, nativeAvailable = true;
+  const context = vm.createContext({ K: () => container, f: {}, Uc: catalogAtom, Jd: accountAtom,
+    H: atom => atom === catalogAtom ? enabled : account,
+    WE: async (target, value) => { assert.equal(target, container); events.push(["sync", value]); },
+    wU: { useEffect: effect => effect() }, kU: { useEffect: effect => effect() },
+    xa: () => ({ checkGate: () => true, isLoading: false }), al: "pairing",
+    I: { get remoteConnections() { return nativeAvailable ? { setRemoteControlEnabled: async params =>
+      events.push(["native", JSON.parse(JSON.stringify(params))]) } : null; } },
+  });
+  vm.runInContext(functions.map(node => result.source.slice(node.start, node.end)).join(";"), context);
+  for (const authMethod of ["apikey", "chatgpt", "copilot"]) {
+    events.length = 0; account = { authMethod, authLoading: true };
+    context.SU(); context.DU(); assert.deepEqual(events, []);
+    account.authLoading = false; context.SU(); context.DU(); await Promise.resolve();
+    const chatgpt = authMethod === "chatgpt";
+    assert.deepEqual(events, [["sync", chatgpt], ["native", {
+      enabled: chatgpt, oneToOnePairingInAppEnabled: chatgpt,
+    }]]);
+  }
+  nativeAvailable = false; events.length = 0; context.DU(); assert.deepEqual(events, []);
+  enabled = false; events.length = 0; context.SU(); assert.deepEqual(events, [["sync", false]]);
+  const changed = { resolveModule: name => options.resolveModule(name).replace("?.localRemoteControlEnabled", "?.unexpectedEnabled") };
+  assert.equal(patchSource(source, changed).status, "unexpected-shape", "catalog selector 漂移必须拒绝");
 });
