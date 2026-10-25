@@ -32,6 +32,7 @@ const PATCH_POLICY = [
   { script: "patch-model-catalog-filter.js", feature: "模型目录过滤" },
   { script: "patch-model-picker-submenu.js", feature: "模型选择器子菜单" },
   { script: "patch-thread-file-manager-action.js", feature: "会话文件管理器入口" },
+  { script: "patch-thread-copy-markdown.js", feature: "未打开会话的完整 Markdown 复制" },
   { script: "patch-browser-auth.js", feature: "API-key 浏览器认证" },
   { script: "patch-plugin-auth.js", feature: "插件认证与功能开关" },
   { script: "patch-remote-control.js", feature: "Remote Control 认证隔离" },

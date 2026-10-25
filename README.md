@@ -56,9 +56,12 @@ pnpm run build:all
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
 - `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
 - `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
+- `patch-thread-file-manager-action.js` 将系统文件管理器入口提升到会话菜单顶层，复用官方工作区打开回调，保留最新工作树解析及失败提示，不覆盖默认编辑器偏好；按菜单内容识别所在 Bundle，支持新版菜单迁移。
+- `patch-thread-copy-markdown.js` 修复未打开会话时 Markdown 复制可能为空的问题，仅在复制操作中加载完整历史，并在需要时复用官方快照及渲染器；不改变日常会话恢复和分页。
 - `patch-archive-delete.js` 让归档列表明确查询全部 Provider，避免切换 Provider 后旧归档被隐藏；新版上游已有原生删除链路时保持原样，旧版才补充永久删除入口。
 - `patch-updater.js` 区分更新方法与调用 Bundle，并在补丁后核对更新方法确实返回禁用状态；缺少目标或结构未知不再误报为已关闭。
 - `sync-upstream.js`、`fetch-msstore.js` 和 `build-from-upstream.js` 强化 Windows x64 官方包选择与固定来源校验，支持精确版本和已验证原始 MSIX 重放；包身份、大小或 SHA-256 不符时拒绝构建，运行检查通过前不生成最终 ZIP。
+- `check-update.js` 在平台检测失败时输出对应错误并以退出码 2 标记检测不完整，不保存部分结果；`fetch-msstore.js` 先筛选目标包，再对同一包摘要的下载地址查询执行有限重试。
 - `windows-artifacts.js` 与 `windows-maintenance.js` 记录官方来源和候选产物哈希，生成候选、验证发布门槛，并保证正式发布复用已经验收的同一 ZIP。
 - `windows-runtime-checks.js` 检查 Windows EXE / 原生模块架构及未修改组件哈希，实际加载 CUA、运行 code-mode host / rg 基础命令，并执行空白隔离桌面的启动、就绪和退出冒烟。
 - `check-scripts.js`、`frontend-source-smoke.js`、`reading-layout-smoke.js` 和 `maintenance-smoke.js` 覆盖脚本语法、真实补丁资源、阅读设置及候选/发布拒绝路径。这些属于补丁结构回归，只证明补丁仍能安全命中和拒绝未知结构；首页、主题、MCP 等运行效果仍以独立 GUI 验收项为准。
