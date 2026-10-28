@@ -2,16 +2,188 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const acorn = require("acorn");
 const vm = require("node:vm");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { nodes } = require("./patch-ast-util");
 
 const {
   DIRECT_ACTION_ID,
+  LEGACY_MARKER,
   MARKER,
   SIDEBAR_MARKER,
   hasSidebarMenuSignatures,
   hasNativeDirectAction,
   patchSidebarSource,
   patchSource,
+  selectTargets,
 } = require("./patch-thread-file-manager-action");
+
+test("26.1016 真实 Bundle：普通目录入口、远程排除和工作区原生打开链路", {
+  skip: !process.env.CODEX_PATCH_REAL_BUNDLE && !process.env.CODEX_PATCH_REAL_ASAR,
+}, async () => {
+  let original;
+  if (process.env.CODEX_PATCH_REAL_BUNDLE) {
+    original = fs.readFileSync(process.env.CODEX_PATCH_REAL_BUNDLE, "utf8");
+  } else {
+    const asar = require("@electron/asar");
+    const archive = process.env.CODEX_PATCH_REAL_ASAR;
+    const entries = asar.listPackage(archive).filter(name => /app-(initial|primary)-[^/\\]+\.js$/.test(name));
+    const sources = entries.map(name => asar.extractFile(archive, name.replace(/^[/\\]/, "")).toString());
+    const matches = sources.filter(source => source.includes(LEGACY_MARKER));
+    assert.equal(matches.length, 1, "当前成品应唯一包含待替换的旧入口");
+    [original] = matches;
+  }
+  const menu = patchSource(original);
+  assert.equal(menu.status, "patched");
+  const copy = require("./patch-thread-copy-markdown").patchSource(menu.source);
+  assert.equal(copy.status, "patched", "同一真实 Bundle 还须能够组合应用 Markdown 复制修复");
+  const result = patchSidebarSource(copy.source);
+  assert.ok(["patched", "already-patched"].includes(result.status));
+  assert.equal(patchSource(result.source).source, result.source);
+  assert.equal(patchSidebarSource(result.source).source, result.source);
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const selectors = nodes(ast, node => node.type === "AssignmentExpression" &&
+    node.left?.name === "VUc");
+  assert.equal(selectors.length, 1);
+  const selector = selectors[0].right.arguments[1];
+  const select = vm.runInNewContext(`(${result.source.slice(selector.start, selector.end)})`, { ah: "remote" });
+  for (const connections of [[], [{ hostId: "local" }], [{ hostId: "other" }]]) {
+    assert.equal(select({ conversationId: "thread", hostId: "local" }, {
+      get: atom => { assert.equal(atom, "remote"); return connections; },
+    }), !connections.some(item => item.hostId === "local"));
+  }
+  const callers = nodes(ast, node => node.type === "LogicalExpression" &&
+    node.right?.type === "CallExpression" && node.right.callee?.property?.name === "push" &&
+    result.source.slice(node.start, node.end).includes("...LUc("));
+  assert.equal(callers.length, 1);
+  const expression = result.source.slice(callers[0].start, callers[0].end);
+  for (const cwd of [null, "C:\\plain-folder"]) {
+    const context = { v: cwd, e: { get: () => true }, VUc: {}, g: "thread", _: "local",
+      L: [], is: value => value, LUc: () => [{ id: DIRECT_ACTION_ID }] };
+    vm.runInNewContext(expression, context);
+    assert.equal(context.L.length, cwd == null ? 0 : 1);
+  }
+  const builder = ast.body.find(node => node.type === "FunctionDeclaration" && node.id.name === "LUc");
+  assert.ok(builder);
+  const builderSource = result.source.slice(builder.start, builder.end);
+  assert.doesNotMatch(builderSource, /onSelect:\(\)=>Bq\(/);
+  let opened, preferredWrites = 0, errors = 0, failure = false;
+  const context = { navigator: { platform: "Win32" }, Iq: {}, DJt: {}, ay: {},
+    GE: {}, QZn: {}, KE: {}, i$a: {}, nl: {}, y_: {},
+    GZn: async () => { context.latestWorkspace = "C:/最新工作树"; },
+    RUc: input => [{ id: "open-workspace-in", icon: "icon", onOpenInTarget: input.onOpenInTarget }] };
+  const scope = { get: atom => {
+      if (atom === context.GE) return true;
+      if (atom === context.QZn) return { data: { latestWorktree: { workspaceRoot: context.latestWorkspace } } };
+      if (atom === context.i$a) return { mutateAsync: async params => { opened = params; return { success: !failure }; } };
+      if (atom === context.nl) return { danger: () => errors++ };
+      if (atom === context.y_) return { formatMessage: message => message.defaultMessage };
+      return null;
+    },
+    getOwnValue() { throw new Error("Missing scope instance"); },
+    query: { getData: () => ({ targets: [{ target: "fileManager", available: true, resolvedIcon: "folder-icon" }] }),
+      getOptions: () => ({ queryKey: [] }), fetch: async () => ({}), setData: () => preferredWrites++ },
+    queryClient: { getQueryState: () => ({ status: "success" }) } };
+  context.scope = scope;
+  vm.runInNewContext(`${builderSource};items=LUc({scope,conversationId:'thread',cwd:'C:/plain-folder',hostId:'local'})`, context);
+  assert.equal(context.items[0].id, DIRECT_ACTION_ID);
+  assert.equal(context.items[0].message.id, "sidebarElectron.openWorkspaceRootInExplorer");
+  context.items[0].onSelect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opened.target, "fileManager");
+  assert.equal(opened.cwd, "C:/最新工作树");
+  assert.equal(opened.hostId, "local");
+  assert.equal(opened.persistPreferredTargetPath, undefined);
+  assert.equal(preferredWrites, 0);
+  context.items[1].onOpenInTarget("vscode", "C:/Code.exe");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opened.target, "vscode");
+  assert.equal(opened.persistPreferredTargetPath, "C:/最新工作树");
+  assert.equal(preferredWrites, 1);
+  failure = true;
+  context.items[0].onSelect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(errors, 1, "真实系统打开失败仍走原生提示");
+});
+
+test("26.1021 app-primary 通过真实 ESM atom 链保留同 host 排除", {
+  skip: !process.env.CODEX_PATCH_1021_PRIMARY_BUNDLE || !process.env.CODEX_PATCH_1021_INITIAL_BUNDLE,
+}, async () => {
+  const primaryPath = process.env.CODEX_PATCH_1021_PRIMARY_BUNDLE;
+  const initialPath = process.env.CODEX_PATCH_1021_INITIAL_BUNDLE;
+  assert.equal(path.basename(primaryPath), "app-primary-844e405f2b90.js");
+  assert.equal(path.basename(initialPath), "app-initial-438d1df57f70.js");
+  const primary = fs.readFileSync(primaryPath, "utf8");
+  const initial = fs.readFileSync(initialPath, "utf8");
+  const openMenu = patchSource(primary);
+  assert.equal(openMenu.status, "patched");
+  const result = patchSidebarSource(openMenu.source, [{ path: initialPath, source: initial }]);
+  assert.equal(result.status, "patched", `${result.status} (${result.count})`);
+
+  const ast = acorn.parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const selector = nodes(ast, node => node.type === "ArrowFunctionExpression" &&
+    result.source.slice(node.start, node.end).includes(SIDEBAR_MARKER) &&
+    node.params[1]?.type === "ObjectPattern" &&
+    node.params[1].properties.some(property => property.key?.name === "get"));
+  assert.equal(selector.length, 1);
+  const [gate] = selector;
+  const getName = gate.params[1].properties.find(property => property.key.name === "get").value.name;
+  const remoteAtom = nodes(gate, node => node.type === "CallExpression" && node.callee.name === getName &&
+    node.arguments[0]?.type === "Identifier")[0].arguments[0].name;
+  const select = vm.runInNewContext(`(${result.source.slice(gate.start, gate.end)})`, { [remoteAtom]: "remote-control" });
+  for (const [connections, expected] of [[[], true], [[{ hostId: "local" }], false], [[{ hostId: "other" }], true]]) {
+    assert.equal(select({ conversationId: "thread", hostId: "local" }, {
+      get: atom => atom === "remote-control" ? connections : true,
+    }), expected);
+  }
+
+  const caller = nodes(ast, node => node.type === "LogicalExpression" &&
+    node.right?.type === "CallExpression" && node.right.callee?.property?.name === "push" &&
+    result.source.slice(node.start, node.end).includes("...JYn("));
+  assert.equal(caller.length, 1);
+  const expression = result.source.slice(caller[0].start, caller[0].end);
+  for (const cwd of [null, "C:/plain-folder"]) {
+    const context = { y: cwd, e: { get: () => true }, QYn: {}, _: "thread", v: "local", R: [],
+      uu: value => value, JYn: () => [{ id: "latest-worktree-entry" }] };
+    vm.runInNewContext(expression, context);
+    assert.equal(context.R.length, cwd == null ? 0 : 1);
+    if (cwd != null) assert.equal(context.R[0].id, "latest-worktree-entry");
+  }
+  const currentRootLookup = nodes(ast, node => node.type === "FunctionDeclaration" && node.id.name === "JYn");
+  assert.equal(currentRootLookup.length, 1);
+  const context = {
+    navigator: { userAgentData: { platform: "Windows" } },
+    Ewe: {}, om: {}, rAe: {}, d9e: {}, ka: {}, ES: {}, FRe: {}, pw: {}, oce: {},
+    latestWorkspace: "C:/最新工作树", opened: null,
+    YYn: input => [{ id: "open-workspace-in", onOpenInTarget: input.onOpenInTarget }],
+    epe: async () => {},
+  };
+  context.scope = {
+    get: atom => atom === context.Ewe ? true : atom === context.rAe
+      ? { data: { latestWorktree: { workspaceRoot: context.latestWorkspace } } }
+      : atom === context.FRe ? context.pw : atom === context.oce
+        ? { mutateAsync: async input => { context.opened = input; return { success: true }; } }
+        : null,
+    query: {
+      getData: atom => atom === context.d9e
+        ? { targets: [{ target: "fileManager", available: true }], availableTargets: ["fileManager"] }
+        : undefined,
+      fetch: async () => ({}),
+      setData: () => {},
+      getOptions: () => ({ queryKey: [] }),
+    },
+    queryClient: { getQueryState: () => ({ status: "success" }) },
+  };
+  const builderSource = result.source.slice(currentRootLookup[0].start, currentRootLookup[0].end);
+  vm.runInNewContext(`${builderSource};items=JYn({scope,conversationId:'thread',cwd:'C:/plain-folder',hostId:'local'})`, context);
+  context.items[1].onOpenInTarget("vscode", "C:/Code.exe");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.opened.cwd, "C:/最新工作树");
+  assert.equal(context.opened.target, "vscode");
+  assert.equal(context.opened.hostId, "local");
+});
 
 function createGroupedMenuBundle(options = {}) {
   const openHelper = options.includeOpenHelper === false
@@ -47,26 +219,38 @@ function createGroupedMenuBundle(options = {}) {
   return openHelper + menuBuilder;
 }
 
-function evaluatePatchedMenu(source, platform) {
+function evaluatePatchedMenu(source, platform, options = {}) {
   const context = {
     navigator: { userAgentData: { platform } },
     targets: {},
     openMutation: {},
+    store: {},
+    derive: (_store, selector) => selector,
     opened: null,
-    makeOpenMenu: () => [{ id: "open-workspace-in", icon: "open-icon" }],
+    makeOpenMenu: input => [{ id: "open-workspace-in", icon: "open-icon", onOpenInTarget: input.onOpenInTarget }],
   };
   context.scope = {
-    get: () => ({ mutate() {} }),
-    open: (params) => {
-      context.opened = params;
-    },
+    get: () => ({
+      mutate(params) { context.opened = params; },
+      async mutateAsync(params) {
+        if (options.reject) throw new Error("测试打开失败");
+        context.opened = params;
+        return { success: options.success !== false };
+      },
+    }),
+    getOwnValue() { throw new Error("Missing scope instance"); },
+    open() { throw new Error("不能从全局侧栏调用文件预览函数"); },
     query: {
       fetch: () => Promise.resolve(),
+      setData() { context.preferredTargetChanged = true; },
       getData: () => ({
         targets: [{ target: "fileManager", resolvedIcon: "folder-icon" }],
       }),
     },
   };
+  context.ensureWorkspace = async () => { context.resolvedWorkspace = "C:\\最新工作树"; };
+  context.resolveWorkspace = fallback => context.resolvedWorkspace ?? fallback;
+  context.reportError = () => { context.reportedErrors = (context.reportedErrors ?? 0) + 1; };
   vm.runInNewContext(
     `${source};result=buildOpenItems({scope,cwd:\`C:\\\\repo\`,hostId:\`local\`})`,
     context,
@@ -137,7 +321,7 @@ test("新版对话菜单增加顶层文件管理器入口并保留打开方式�
   assert.ok(result.source.includes(`id:\`${DIRECT_ACTION_ID}\``));
   assert.match(
     result.source,
-    /onSelect:\(\)=>openItem\(\{scope:s,path:c,cwd:c,hostId:h,target:`fileManager`,openMode:`workspace`\}\)/,
+    /onSelect:\(\)=>__codexOpenWorkspaceInTarget\(`fileManager`\)/,
   );
   assert.match(
     result.source,
@@ -286,7 +470,8 @@ test("顶层入口按系统显示文案并复用 fileManager 打开链路", () =
     context.result[0].onSelect();
     assert.equal(context.opened.target, "fileManager");
     assert.equal(context.opened.cwd, "C:\\repo");
-    assert.equal("persistPreferredTargetPath" in context.opened, false);
+    assert.equal(context.opened.persistPreferredTargetPath, undefined);
+    assert.equal(context.preferredTargetChanged, undefined);
   }
 });
 
@@ -308,11 +493,174 @@ test("新旧菜单实现共存时优先修补新版动作聚合器", () => {
   assert.ok(result.source.includes(MARKER));
 });
 
-test("打开链路缺失时拒绝生成不完整补丁", () => {
-  const result = patchSource(
-    createGroupedMenuBundle({ includeOpenHelper: false }),
-  );
+test("工作区菜单不依赖要求 ThreadScope 的文件预览函数", () => {
+  const result = patchSource(createGroupedMenuBundle({ includeOpenHelper: false }));
+  assert.equal(result.status, "patched");
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  context.result[0].onSelect();
+  assert.equal(context.opened.path, "C:\\repo");
+});
 
-  assert.equal(result.status, "unexpected-open-helper-count");
-  assert.equal(result.count, 0);
+test("原生工作区打开回调缺失时保留原文并报错", () => {
+  const original = createGroupedMenuBundle().replace("onOpenInTarget:", "changedOpenHandler:");
+  const result = patchSource(original);
+  assert.equal(result.status, "missing-workspace-open-callback");
+  assert.equal(result.source, original);
+});
+
+function createCurrentWorkspaceBundle() {
+  return createGroupedMenuBundle().replace(
+    "onOpenInTarget:(target,appPath)=>{s.get(openMutation).mutate({path:c,cwd:c,hostId:h,target,appPath,openMode:`workspace`,persistPreferredTargetPath:c},{onError:report})}",
+    "onOpenInTarget:async(target,appPath)=>{try{await ensureWorkspace();let cwd=resolveWorkspace(c);s.query.setData(targets,request,data=>({...data,preferredTarget:target}));let result=await s.get(openMutation).mutateAsync({path:cwd,cwd,hostId:h,target,appPath,openMode:`workspace`,persistPreferredTargetPath:cwd});if(!result.success)reportError()}catch(error){reportError()}}",
+  );
+}
+
+test("打开最新工作树且不改变默认编辑器，原生子菜单仍保存偏好", async () => {
+  const result = patchSource(createCurrentWorkspaceBundle());
+  assert.equal(result.status, "patched");
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  await context.result[0].onSelect();
+  assert.equal(context.opened.path, "C:\\最新工作树");
+  assert.equal(context.opened.cwd, "C:\\最新工作树");
+  assert.equal(context.opened.target, "fileManager");
+  assert.equal(context.opened.persistPreferredTargetPath, undefined);
+  assert.equal(context.preferredTargetChanged, undefined);
+  await context.result[1].onOpenInTarget("vscode", "C:\\Code.exe");
+  assert.equal(context.preferredTargetChanged, true);
+  assert.equal(context.opened.persistPreferredTargetPath, "C:\\最新工作树");
+  assert.equal(context.opened.target, "vscode");
+});
+
+test("系统打开返回失败或异常仍显示原生错误提示", async () => {
+  const result = patchSource(createCurrentWorkspaceBundle());
+  for (const options of [{ success: false }, { reject: true }]) {
+    const context = evaluatePatchedMenu(result.source, "Windows", options);
+    await context.result[0].onSelect();
+    assert.equal(context.reportedErrors, 1);
+  }
+});
+
+test("只替换已知旧注入并保持原生菜单，未知旧改动不被删除", () => {
+  const source = createGroupedMenuBundle();
+  const old = source.replace("return makeOpenMenu({", "let __codexOpenWorkspaceItems=makeOpenMenu({")
+    .replace("})}const copyMessage", `});let __codexDesktopPlatform=\`win\`;return[{${LEGACY_MARKER}id:\`${DIRECT_ACTION_ID}\`,onSelect:()=>openItem({scope:s,path:c,cwd:c,hostId:h,target:\`fileManager\`,openMode:\`workspace\`})},...__codexOpenWorkspaceItems]}const copyMessage`);
+  const result = patchSource(old);
+  assert.equal(result.status, "patched");
+  assert.equal(result.source.includes(LEGACY_MARKER), false);
+  assert.equal(result.source.split(DIRECT_ACTION_ID).length - 1, 1);
+  const context = evaluatePatchedMenu(result.source, "Windows");
+  context.result[0].onSelect();
+  assert.equal(context.opened.target, "fileManager");
+  assert.equal(patchSource(result.source).status, "already-patched");
+  const unknown = old.replace(`return[{${LEGACY_MARKER}`, `changed();return[{${LEGACY_MARKER}`);
+  assert.equal(patchSource(unknown).status, "unexpected-legacy-menu");
+  assert.equal(patchSource(unknown).source, unknown);
+});
+
+test("菜单迁移到 app-primary 且无远程配置名时仍定位两类补丁", () => {
+  const sidebar = "const remoteConnections=derive(store,({get})=>get(config).remoteControl);" +
+    createSelectorSidebarMenuBundle().replace("getState(g,`remote_control_connections`)", "g(remoteConnections)");
+  const source = createCurrentWorkspaceBundle() + sidebar;
+  assert.equal(source.includes("remote_control_connections"), false);
+  const targets = selectTargets([
+    { platform: "win", path: "app-initial-new.js", source: "const initial=true;" },
+    { platform: "win", path: "app-primary-new.js", source },
+  ]);
+  assert.deepEqual(targets.map(({ path, patchKind }) => [path, patchKind]), [
+    ["app-primary-new.js", "open-menu"], ["app-primary-new.js", "sidebar"],
+  ]);
+  let patched = source;
+  for (const target of targets) {
+    const result = (target.patchKind === "sidebar" ? patchSidebarSource : patchSource)(patched);
+    assert.equal(result.status, "patched");
+    patched = result.source;
+  }
+  const context = { store: {}, config: {}, gitBacked: {}, derive: (_store, selector) => selector };
+  const gate = vm.runInNewContext(`${patched};sidebarGate`, context);
+  for (const connections of [[], [{ hostId: "local" }], [{ hostId: "other" }]]) {
+    assert.equal(gate({ conversationId: "thread", hostId: "local" }, { get: () => connections }),
+      !connections.some(connection => connection.hostId === "local"));
+  }
+});
+
+test("按平台独立选择实际菜单，支持旧版分离 chunk 与原生入口", () => {
+  const targets = selectTargets([
+    { platform: "mac-arm64", path: "mac/app-initial.js", source: createGroupedMenuBundle() },
+    { platform: "win", path: "win/app-initial.js", source: "const initial=true;" },
+    { platform: "mac-arm64", path: "mac/app-primary.js", source: createSidebarMenuBundle() },
+    { platform: "win", path: "win/app-primary.js", source: createGroupedMenuBundle() + createSidebarMenuBundle() },
+  ]);
+  assert.deepEqual(targets.map(({ path, patchKind }) => [path, patchKind]), [
+    ["mac/app-initial.js", "open-menu"], ["mac/app-primary.js", "sidebar"],
+    ["win/app-primary.js", "open-menu"], ["win/app-primary.js", "sidebar"],
+  ]);
+  const native = selectTargets([
+    { platform: "win", path: "app-initial.js", source: "const initial=true;" },
+    { platform: "win", path: "app-primary.js", source: "const items=[{id:`open-thread-folder`}];" },
+  ]);
+  assert.equal(native.length, 1);
+  assert.equal(native[0].path, "app-primary.js");
+  assert.equal(patchSource(native[0].source).status, "native");
+});
+
+test("菜单未知时仍进入检查并失败，不因 chunk 变化静默跳过", () => {
+  const targets = selectTargets([
+    { platform: "win", path: "app-initial.js", source: "const changedMenu=true;" },
+    { platform: "win", path: "app-primary.js", source: "const primary=true;" },
+  ]);
+  assert.equal(targets.length, 1);
+  assert.equal(patchSource(targets[0].source).status, "unexpected-menu-builder-count");
+});
+
+test("CLI 在实际资源目录执行 check → apply → check，重复目标在写入前被拒绝", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-file-manager-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assets = path.join(root, "win", "_asar", "webview", "assets");
+  fs.mkdirSync(assets, { recursive: true });
+  const initial = path.join(assets, "app-initial-test.js");
+  const primary = path.join(assets, "app-primary-test.js");
+  const initialSource = "const remoteConnections=derive(store,({get})=>get(config).remoteControl);" +
+    "export {remoteConnections as remoteConnectionsExport};";
+  const source = "import {remoteConnectionsExport as remoteConnections} from './app-initial-test.js';" +
+    createCurrentWorkspaceBundle() + createSelectorSidebarMenuBundle()
+      .replace("getState(g,`remote_control_connections`)", "g(remoteConnections)");
+  fs.writeFileSync(initial, initialSource);
+  fs.writeFileSync(primary, source);
+  const run = check => spawnSync(process.execPath,
+    [path.join(__dirname, "patch-thread-file-manager-action.js"), "win", ...(check ? ["--check"] : [])],
+    { encoding: "utf8", env: { ...process.env, CODEX_PATCH_SOURCE_DIR: root } });
+  const checked = run(true);
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, "const remoteConnections=true;");
+  const missingExport = run(true);
+  assert.equal(missingExport.status, 1);
+  assert.match(missingExport.stdout + missingExport.stderr, /unexpected-sidebar-menu-gate-count/);
+  assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, initialSource.replace(".remoteControl", ".otherConfig"));
+  const unrelatedAtom = run(true);
+  assert.equal(unrelatedAtom.status, 1);
+  assert.match(unrelatedAtom.stdout + unrelatedAtom.stderr, /unexpected-sidebar-menu-gate-count/);
+  assert.equal(fs.readFileSync(primary, "utf8"), source);
+  fs.writeFileSync(initial, initialSource);
+  const applied = run(false);
+  assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+  const patched = fs.readFileSync(primary, "utf8");
+  assert.ok(patched.includes(MARKER) && patched.includes(SIDEBAR_MARKER));
+  assert.equal(run(true).status, 0);
+  assert.equal(fs.readFileSync(primary, "utf8"), patched);
+  const menu = evaluatePatchedMenu(patched.replace(
+    "import {remoteConnectionsExport as remoteConnections} from './app-initial-test.js';",
+    "",
+  ), "Windows");
+  return menu.result[0].onSelect().then(() => {
+    assert.equal(menu.opened.target, "fileManager");
+    fs.writeFileSync(initial, source);
+    fs.writeFileSync(primary, source);
+    const ambiguous = run(false);
+    assert.equal(ambiguous.status, 1);
+    assert.match(ambiguous.stderr, /ambiguous open-menu bundles/);
+    assert.equal(fs.readFileSync(initial, "utf8"), source);
+    assert.equal(fs.readFileSync(primary, "utf8"), source);
+  });
 });
