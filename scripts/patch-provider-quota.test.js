@@ -83,6 +83,38 @@ test("拆分 Composer 只沿真实初始模块导出识别 Provider atom", () =>
   assert.equal(patchSource(source, { resolveModule: () => dependency.replace("atom as provider", "other as provider") }).status, "error");
 });
 
+test("拆分 Composer 执行时不调用被参数遮蔽的官方导入名", () => {
+  const source = fixture().replace(/import[^;]+;/,
+    'import{provider as p,initialize as Ie,quota as quotaAtom,hard as hardBlockAtom,host as hostAtom}from"./app-initial-fixture.js";')
+    .replace("function providerFor(store,id,config){return store.get(threadProvider,id)??config.model_provider}", "")
+    .replace("let{submitDisabled:external}=props", "let{submitDisabled:external,composerController:Ie,provider:p}=props");
+  const dependency = "var atom;function init(){atom=cj(({summary:e})=>e.modelProvider||null)}function providerFor(get,id,config){return get(atom,id)??config.model_provider}export{atom as provider,init as initialize};";
+  const options = { resolveModule: () => dependency };
+  const result = patchSource(source, options);
+  assert.equal(result.status, "patched", result.reason);
+  assert.equal(patchSource(result.code, options).status, "already");
+  const { parse } = require("acorn"), vm = require("node:vm");
+  const ast = parse(result.code, { ecmaVersion: "latest", sourceType: "module" });
+  const composer = ast.body.find(node => node.type === "FunctionDeclaration" && node.id.name === "Composer");
+  const atom = {}, context = vm.createContext({ URL, target: {}, Editor: {},
+    __codexQuotaThreadProviderAtom: atom,
+    __codexQuotaThreadProviderInit: () => { context.initialized = true; },
+    quotaAtom: "quota", hardBlockAtom: "hard", hostAtom: "host",
+    cacheMiss: () => true, currentConversation: () => "thread-a",
+    useScope: () => ({ value: { kind: "local" } }),
+    useConfig: () => ({ isConfigDataPending: false, resolvedConfig: {
+      model_provider: "custom", model_providers: { custom: { base_url: "https://proxy.example/v1" } } } }),
+    read: item => {
+      if (item === atom) { assert.equal(context.initialized, true); return context.savedProvider; }
+      return item === "host" ? "local" : true;
+    }, value: () => true, save: () => {}, jsx: (_, props) => props });
+  vm.runInContext(result.code.slice(composer.start, composer.end), context);
+  assert.equal(context.Composer({ composerController: {}, provider: "shadow" }).submitDisabled, false);
+  assert.equal(context.Composer({ submitDisabled: true }).submitDisabled, true);
+  context.savedProvider = "openai";
+  assert.equal(context.Composer({}).submitDisabled, true, "官方会话额度门槛保留");
+});
+
 test("实际生成的发送门槛只忽略明确第三方端点的官方额度", () => {
   const result = patchSource(fixture());
   assert.equal(result.status, "patched", result.reason);
@@ -121,6 +153,50 @@ test("实际生成的发送门槛只忽略明确第三方端点的官方额度",
   assert.equal(context.Composer({}).submitDisabled, true, "云会话不能绕过官方额度");
 });
 
+test("真实 ASAR 的 Composer 参数作用域内执行额度补丁", { skip: !process.env.CODEX_REBUILD_QUOTA_ASAR }, () => {
+  const asar = require("@electron/asar"), vm = require("node:vm");
+  const { parse } = require("acorn"), { walk } = require("./patch-ast-util");
+  const file = process.env.CODEX_REBUILD_QUOTA_ASAR;
+  const candidates = asar.listPackage(file).filter(name => /codex-composer-adapter-.*\.js$/.test(name))
+    .map(name => asar.extractFile(file, name.slice(1)).toString())
+    .filter(source => source.includes("isConfigDataPending"));
+  assert.equal(candidates.length, 1);
+  const options = { resolveModule: name => asar.extractFile(file,
+    `webview\\assets\\${name.replace("./", "")}`).toString() };
+  const result = patchSource(candidates[0], options);
+  assert.notEqual(result.status, "error", result.reason);
+  assert.equal(patchSource(result.code, options).status, "already");
+  const ast = parse(result.code, { ecmaVersion: "latest", sourceType: "module" });
+  const composer = ast.body.find(node => node.type === "FunctionDeclaration" &&
+    node.body.body.some(statement => statement.declarations?.[0]?.id.name === "__codexQuotaThreadProvider"));
+  assert.ok(composer);
+  const guard = composer.body.body.find(node => node.declarations?.[0]?.id.name === "__codexQuotaThreadProvider");
+  const lookup = guard.declarations[0].init;
+  assert.equal(lookup.type, "SequenceExpression");
+  const read = lookup.expressions.at(-1);
+  let config, scope;
+  walk(guard, node => {
+    if (node.type === "MemberExpression" && node.property.name === "isConfigDataPending") config = node.object.name;
+    if (node.type === "MemberExpression" && node.property.name === "kind") scope = node.object.object.name;
+  });
+  // 保留真实参数解构，不能在全局伪造 Ie 函数后单独执行 guard 掩盖遮蔽。
+  const pattern = composer.body.body.flatMap(node => node.declarations ?? [])
+    .find(node => node.id.type === "ObjectPattern" && node.id.properties.some(prop => prop.key?.name === "composerController"))?.id;
+  assert.ok(pattern);
+  let savedProvider = null, initialized = false;
+  const atom = {}, context = vm.createContext({ URL, props: { composerController: {} },
+    __codexQuotaThreadProviderAtom: atom,
+    __codexQuotaThreadProviderInit: () => { initialized = true; },
+    [read.callee.name]: value => { assert.equal(value, atom); assert.ok(initialized); return savedProvider; },
+    [read.arguments[1].name]: "thread-a", [scope]: { value: { kind: "local" } },
+    [config]: { isConfigDataPending: false, resolvedConfig: {
+      model_provider: "custom", model_providers: { custom: { base_url: "https://proxy.example/v1" } } } } });
+  vm.runInContext(`function evaluate(){let ${result.code.slice(pattern.start, pattern.end)}=props;${result.code.slice(guard.start, guard.end)}return __codexUsesCustomProvider}`, context);
+  assert.equal(context.evaluate(), true);
+  savedProvider = "openai";
+  assert.equal(context.evaluate(), false);
+});
+
 test("26.1021 真实 adapter 的 Provider 依赖与发送门槛", { skip: !process.env.CODEX_REBUILD_1021_BUNDLE }, () => {
   const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
   const { parse } = require("acorn");
@@ -147,7 +223,7 @@ test("26.1021 真实 adapter 的 Provider 依赖与发送门槛", { skip: !proce
   walk(disabled.init, node => { if (node.type === "Identifier") names.add(node.name); });
   const context = vm.createContext(Object.fromEntries([...names].map(name => [name, false])));
   let state;
-  Object.assign(context, { URL, H: "thread-a", __codexQuotaThreadProviderAtom: {}, sn: () => {},
+  Object.assign(context, { URL, H: "thread-a", __codexQuotaThreadProviderAtom: {}, __codexQuotaThreadProviderInit: () => {},
     A: () => state.savedProvider, R: { value: { kind: "local" } },
     Fr: { isConfigDataPending: false, resolvedConfig: { model_provider: "custom", model_providers: {} } },
     Pn: true, Ur: true });

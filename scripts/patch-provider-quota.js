@@ -116,17 +116,22 @@ function getProviderMetadata(source, { resolveModule } = {}) {
     const atomExport = unique(exports.filter(item => item.local.name === name), "Thread-provider export").exported.name;
     const initExport = unique(exports.filter(item => item.local.name === initializer.id.name),
       "Thread-provider initializer export").exported.name;
+    // 官方压缩导入名可能被 Composer 参数解构遮蔽（26.1023 的 Ie）。
+    // 使用专用导入名；重复应用时只复用本补丁自己的同名导入。
     const aliases = [[atomExport, "__codexQuotaThreadProviderAtom"], [initExport, "__codexQuotaThreadProviderInit"]]
-      .map(([exported, fallback]) => {
-        const imported = dependency.specifiers.filter(item => item.imported?.name === exported);
-        if (imported.length > 1 || !imported.length && source.includes(fallback)) {
+      .map(([exported, local]) => {
+        const imported = dependency.specifiers.filter(item => item.local.name === local);
+        const occurrences = nodes(ast, node => node.type === "Identifier" && node.name === local);
+        if (imported.length > 1 || imported.length && imported[0].imported?.name !== exported ||
+            !imported.length && occurrences.length) {
           throw new Error("Thread-provider import binding is ambiguous/already occupied");
         }
-        return imported[0]?.local.name ?? fallback;
+        return local;
       });
     const [atomAlias, initAlias] = aliases;
     const missing = [[atomExport, atomAlias], [initExport, initAlias]]
-      .filter(([exported]) => !dependency.specifiers.some(item => item.imported?.name === exported));
+      .filter(([exported, local]) => !dependency.specifiers.some(item =>
+        item.imported?.name === exported && item.local.name === local));
     return { threadProviderAtom: atomAlias,
       threadProviderImport: { source: dependency.source.value, name: atomExport },
       initialize: `${initAlias}(),`,
