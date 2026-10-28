@@ -54,6 +54,7 @@ pnpm run build:all
 - `patch-hide-invite-menu.js` 隐藏账户菜单中的“邀请好友 / 邀请同事”入口。
 - `patch-sidebar-usage.js` 在 ChatGPT 登录时以剩余额度圆环和百分比替换侧栏头像，复用官方额度查询和刷新机制，点击仍打开原账户菜单。
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
+- `patch-rebuild-settings.js` 将正文宽度、Markdown 粗体颜色和本地强调色预设保存到 `CODEX_HOME/codex-rebuild-settings.json`，独立于程序目录与浏览器 User Data；通过限定的可信 IPC 读取和保存，不读取或迁移旧 localStorage。官方账户主题仍由官方管理。
 - `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
 - `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
 - `patch-thread-file-manager-action.js` 将系统文件管理器入口提升到会话菜单顶层，复用官方工作区打开回调，保留最新工作树解析及失败提示，不覆盖默认编辑器偏好；按菜单内容识别所在 Bundle，支持新版菜单迁移。

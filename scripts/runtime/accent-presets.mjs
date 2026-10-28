@@ -1,4 +1,5 @@
-export const ACCENT_PRESET_STORAGE_KEY = "codex-rebuild:accent-preset:v1";
+import { readSettings, writeSettings, reportSettingsError } from "./rebuild-settings.mjs";
+export const ACCENT_PRESET_STORAGE_KEY = "accentPreset";
 export const CUSTOM_ACCENT_PRESET = "custom";
 export const ACCENT_PRESETS = new Set([
   "default",
@@ -12,23 +13,14 @@ export const ACCENT_PRESETS = new Set([
   CUSTOM_ACCENT_PRESET,
 ]);
 
-function storage() {
-  return globalThis.localStorage;
-}
-
 export function readLocalAccentPreset() {
-  try {
-    const value = storage()?.getItem(ACCENT_PRESET_STORAGE_KEY);
-    return ACCENT_PRESETS.has(value) ? value : null;
-  } catch {
-    return null;
-  }
+  const value = readSettings()[ACCENT_PRESET_STORAGE_KEY];
+  return ACCENT_PRESETS.has(value) ? value : null;
 }
 
-function saveLocalAccentPreset(preset) {
-  try {
-    storage()?.setItem(ACCENT_PRESET_STORAGE_KEY, preset);
-  } catch {}
+async function saveLocalAccentPreset(preset) {
+  try { await writeSettings({ [ACCENT_PRESET_STORAGE_KEY]: preset }); }
+  catch (error) { reportSettingsError(error); }
 }
 
 export function accentPresetSelection(accountTheme, accentSource, fallback) {
@@ -46,12 +38,12 @@ export function resolveAccentPreset(accentSource, accountPreset) {
 }
 
 export function selectAccentPreset(accountTheme, preset, applyLocal, selectAccount) {
-  return Promise.resolve().then(() => {
+  return Promise.resolve().then(async () => {
     // 上游可能新增预设；本模块不认识时不保存本地值，也不吞掉官方选择动作。
     if (!ACCENT_PRESETS.has(preset)) return selectAccount();
     // 无论当前是否能同步到 ChatGPT 账户，都保留一份本地预设。
     // 自定义 Provider 重启后可能拿不到账户主题；此时仍应恢复用户上次选择的官方预设。
-    saveLocalAccentPreset(preset);
+    await saveLocalAccentPreset(preset);
     if (accountTheme !== null) {
       return selectAccount();
     }
@@ -59,8 +51,8 @@ export function selectAccentPreset(accountTheme, preset, applyLocal, selectAccou
   });
 }
 
-export function useCustomAccent(onChange, value) {
+export async function useCustomAccent(onChange, value) {
   // 缺少键表示从未设置，本地模式会采用官方默认蓝色；显式 custom 才表示用户选择自定义色。
-  saveLocalAccentPreset(CUSTOM_ACCENT_PRESET);
+  await saveLocalAccentPreset(CUSTOM_ACCENT_PRESET);
   return onChange(value);
 }

@@ -156,7 +156,10 @@ function verifyFrontendSource(assets) {
   assert.match(serviceTierSource, /CodexRebuildServiceTierApiKeyAccess/);
   assert.match(serviceTierSource, /\{fast:!0,ultrafast:!0\}\/\* CodexRebuildServiceTierApiKeyRequest \*\//);
   const accentModule = fs.readFileSync(path.join(assets, "codex-rebuild-accent-presets.js"), "utf8");
-  assert.match(accentModule, /codex-rebuild:accent-preset:v1/);
+  assert.match(accentModule, /ACCENT_PRESET_STORAGE_KEY = "accentPreset"/);
+  assert.match(accentModule, /readSettings/);
+  assert.match(accentModule, /writeSettings/);
+  assert.doesNotMatch(accentModule, /localStorage/);
   assert.match(accentModule, /export function resolveAccentPreset/);
   assert.match(accentModule, /preset == null \|\| preset === "default" \? "blue" : preset/);
   assert.match(accentModule, /CUSTOM_ACCENT_PRESET = "custom"/);
@@ -166,7 +169,14 @@ function verifyFrontendSource(assets) {
   assert.match(readingModule, /MAX_WIDTH_PERCENT = 100/);
   assert.match(readingModule, /WIDTH_STEP = 5/);
   assert.match(readingModule, /type: "range"/);
-  assert.match(readingModule, /codex-rebuild:markdown-bold-color-mode:v1/);
+  assert.match(readingModule, /markdownBoldColorMode/);
+  assert.match(readingModule, /\.\/rebuild-settings\.mjs/);
+  assert.doesNotMatch(readingModule, /localStorage/);
+  const settingsClient = fs.readFileSync(path.join(assets, "rebuild-settings.mjs"), "utf8");
+  assert.match(settingsClient, /electronBridge\?\.rebuildSettings/);
+  assert.match(settingsClient, /bridge\.read\(\)/);
+  assert.match(settingsClient, /bridge\.write\(patch\)/);
+  assert.doesNotMatch(settingsClient, /localStorage/);
   assert.match(readingModule, /--app-color-text-accent/);
   assert.doesNotMatch(readingModule, /--color-token-charts-green|--green-500|#00a240/);
   assert.doesNotMatch(readingModule, /设置无效|请重新选择/);

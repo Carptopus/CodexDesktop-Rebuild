@@ -35,22 +35,37 @@ function themeFixture() {
     'return a==null?d:{...d,"--color-background-user-message":a.userMessageBackground,"--color-text-user-message":a.userMessageText,"--app-color-background-accent":a.soft}}export{Tba}';
 }
 
-function fakeStorage(initial = {}) {
-  const values = new Map(Object.entries(initial));
-  return {
-    values,
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-    removeItem: key => values.delete(key),
-  };
+const defaults = {
+  readingWidthPercent: 50,
+  markdownBoldColorMode: "default",
+  markdownBoldCustomColor: "#7c3aed",
+  accentPreset: null,
+};
+let snapshot = { ...defaults };
+let failWrites = false;
+const listeners = new Set();
+function replaceSnapshot(next) {
+  snapshot = { ...next };
+  for (const listener of listeners) listener({ ...snapshot });
 }
+globalThis.electronBridge = { rebuildSettings: {
+  read: () => ({ ...snapshot }),
+  async write(patch) {
+    if (failWrites) throw new Error("settings unavailable");
+    snapshot = { ...snapshot, ...patch };
+    for (const listener of listeners) listener({ ...snapshot });
+    return { ...snapshot };
+  },
+  onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+} };
 
 async function runtimeModule() {
   return import(pathToFileURL(path.join(__dirname, "runtime", "accent-presets.mjs")).href);
 }
 
 test.afterEach(() => {
-  delete globalThis.localStorage;
+  failWrites = false;
+  replaceSnapshot(defaults);
 });
 
 test("无账户主题时启用本地预设并保留加载态禁用", () => {
@@ -155,14 +170,12 @@ test("真实资源路径可核对 26.1021 设置与主题 Bundle", { skip: !proc
 
 test("本地设置、账户同步和显式自定义使用同一预设状态", async () => {
   const runtime = await runtimeModule();
-  const storage = fakeStorage();
-  globalThis.localStorage = storage;
   let localCalls = 0;
   let accountCalls = 0;
   let customValue = null;
 
   await runtime.selectAccentPreset(null, "blue", () => { localCalls++; }, () => { accountCalls++; });
-  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "blue");
+  assert.equal(snapshot.accentPreset, "blue");
   assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "blue");
   assert.equal(runtime.accentPresetSelection({ chatTheme: "green" }, "custom", "custom"), "blue");
   assert.equal(runtime.accentPresetSelection(undefined, "custom", "custom"), "custom");
@@ -172,53 +185,47 @@ test("本地设置、账户同步和显式自定义使用同一预设状态", as
   assert.equal(accountCalls, 0);
 
   await runtime.selectAccentPreset({ chatTheme: "green" }, "green", () => { localCalls++; }, () => { accountCalls++; });
-  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "green");
+  assert.equal(snapshot.accentPreset, "green");
   assert.equal(accountCalls, 1);
 
-  globalThis.localStorage = {
-    getItem: () => null,
-    setItem: () => { throw new Error("storage unavailable"); },
-    removeItem: () => {},
-  };
+  failWrites = true;
   await runtime.selectAccentPreset({ chatTheme: "purple" }, "purple", () => { localCalls++; }, () => { accountCalls++; });
   assert.equal(accountCalls, 2);
 
   await runtime.selectAccentPreset({ chatTheme: "future" }, "future-preset", () => { localCalls++; }, () => { accountCalls++; });
   assert.equal(accountCalls, 3);
-  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "green");
+  assert.equal(snapshot.accentPreset, "green");
 
   await runtime.selectAccentPreset(null, "future-preset", () => { localCalls++; }, () => { accountCalls++; });
   assert.equal(accountCalls, 4);
   assert.equal(localCalls, 1);
 
-  globalThis.localStorage = storage;
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
-  runtime.useCustomAccent(value => { customValue = value; }, "#123456");
+  failWrites = false;
+  replaceSnapshot({ ...snapshot, accentPreset: "blue" });
+  await runtime.useCustomAccent(value => { customValue = value; }, "#123456");
   assert.equal(customValue, "#123456");
-  assert.equal(storage.values.get(runtime.ACCENT_PRESET_STORAGE_KEY), "custom");
+  assert.equal(snapshot.accentPreset, "custom");
   assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "custom");
   assert.equal(runtime.resolveAccentPreset("custom", null), null);
 });
 
 test("预设解析补齐官方默认有效色并拒绝无效本地值", async () => {
   const runtime = await runtimeModule();
-  const storage = fakeStorage();
-  globalThis.localStorage = storage;
   assert.equal(runtime.accentPresetSelection(null, "custom", "custom"), "default");
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
+  replaceSnapshot({ ...snapshot, accentPreset: "blue" });
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
   assert.equal(runtime.resolveAccentPreset("chatgpt", "green"), "green");
   assert.equal(runtime.resolveAccentPreset("custom", "green"), "blue");
 
   for (const preset of ["blue", "black"]) {
-    storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);
+    replaceSnapshot({ ...snapshot, accentPreset: preset });
     assert.equal(runtime.resolveAccentPreset("custom", null), preset);
   }
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "default");
+  replaceSnapshot({ ...snapshot, accentPreset: "default" });
   assert.equal(runtime.accentPresetSelection(null, "custom"), "default");
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "not-a-preset");
+  replaceSnapshot({ ...snapshot, accentPreset: "not-a-preset" });
   assert.equal(runtime.resolveAccentPreset("custom", null), "blue");
 });
 
@@ -226,19 +233,19 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-accent-theme-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.copyFileSync(path.join(__dirname, "runtime", "accent-presets.mjs"), path.join(directory, MODULE));
+  fs.copyFileSync(path.join(__dirname, "runtime", "rebuild-settings.mjs"), path.join(directory, "rebuild-settings.mjs"));
   const result = patchThemeSource(themeFixture());
   assert.equal(result.status, "patched", result.reason);
   const bundle = path.join(directory, "theme.mjs");
   fs.writeFileSync(bundle, result.source, "utf8");
   const theme = await import(`${pathToFileURL(bundle).href}?test=${Date.now()}`);
   const runtime = await runtimeModule();
-  const storage = fakeStorage();
-  globalThis.localStorage = storage;
+  replaceSnapshot({ ...snapshot, accentPreset: null });
 
   const localImplicitDefault = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localImplicitDefault["--color-background-user-message"], "#blue-bubble");
 
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "blue");
+  replaceSnapshot({ ...snapshot, accentPreset: "blue" });
   const localBlue = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localBlue["--color-background-user-message"], "#blue-bubble");
   assert.notEqual(localBlue["--color-background-user-message"], "neutral-bubble");
@@ -249,15 +256,15 @@ test("完整主题链复用官方预设气泡且账户主题优先", async t => 
   assert.equal(localWithAccountData["--color-background-user-message"], "#blue-bubble");
 
   for (const preset of ["blue", "black"]) {
-    storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, preset);
+    replaceSnapshot({ ...snapshot, accentPreset: preset });
     const rendered = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
     assert.equal(rendered["--color-background-user-message"], `#${preset}-bubble`);
   }
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "default");
+  replaceSnapshot({ ...snapshot, accentPreset: "default" });
   const localDefault = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localDefault["--color-background-user-message"], "#blue-bubble");
 
-  storage.values.set(runtime.ACCENT_PRESET_STORAGE_KEY, "custom");
+  replaceSnapshot({ ...snapshot, accentPreset: "custom" });
   const localCustom = theme.Tba({ accentSource: "custom", accent: "#custom" }, "light", null);
   assert.equal(localCustom["--color-background-user-message"], "neutral-bubble");
 });

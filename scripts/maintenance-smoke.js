@@ -123,6 +123,13 @@ try {
     ["remote-control-fixture.js", "const event='set-remote-control-connections-enabled';"],
     ["app-theme-fixture.js", "const theme={'--color-image-generation-accent':'blue'};"],
   ];
+  const settingsBridgeEvidence = [
+    ["main-settings-fixture.js", "const options={isTrustedIpcEvent:trust,getContextForWebContents:getContext};"],
+    ["preload.js", "contextBridge.exposeInMainWorld('electronBridge',{});"],
+  ];
+  for (const [name, source] of settingsBridgeEvidence) {
+    write(path.join(evidenceAsar, ".vite", "build", name), source);
+  }
   for (const [name, source] of frontendEvidence) {
     write(path.join(evidenceAsar, "webview", "assets", name), source);
   }
@@ -146,6 +153,12 @@ try {
   }
   saveCompatibilityEvidence(evidenceAsar, { version: "fixture" }, evidenceOutput);
   const evidenceIndex = JSON.parse(fs.readFileSync(path.join(evidenceOutput, "index.json"), "utf8"));
+  for (const [name, source] of settingsBridgeEvidence) {
+    const entry = evidenceIndex.files.find(file => file.name === name);
+    assert.equal(entry?.copied, true, `缺少外观配置桥取证：${name}`);
+    assert.equal(fs.readFileSync(path.join(evidenceOutput, "main", name), "utf8"), source);
+    assert.equal(entry.sha256, hash(source));
+  }
   for (const [name, source] of frontendEvidence) {
     const entry = evidenceIndex.files.find(file => file.name === name);
     assert.equal(entry?.copied, true, `缺少新版独立功能块取证：${name}`);

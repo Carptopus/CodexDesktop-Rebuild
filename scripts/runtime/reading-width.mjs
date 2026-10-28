@@ -1,4 +1,5 @@
 // 只保存阅读布局与 Markdown 粗体样式偏好，认证、Provider 与任务配置由原程序管理。
+import { readSettings, writeSettings, reportSettingsError, SETTINGS_CHANGED } from "./rebuild-settings.mjs";
 export const MIN_WIDTH_PERCENT = 50;
 export const MAX_WIDTH_PERCENT = 100;
 export const WIDTH_STEP = 5;
@@ -6,10 +7,10 @@ export const WIDTHS = Array.from(
   { length: (MAX_WIDTH_PERCENT - MIN_WIDTH_PERCENT) / WIDTH_STEP + 1 },
   (_, index) => String(MIN_WIDTH_PERCENT + index * WIDTH_STEP),
 );
-export const STORAGE_KEY = "codex-rebuild:reading-width:v1";
+export const STORAGE_KEY = "readingWidthPercent";
 export const BOLD_COLOR_MODES = ["default", "accent", "custom"];
-export const BOLD_MODE_STORAGE_KEY = "codex-rebuild:markdown-bold-color-mode:v1";
-export const BOLD_CUSTOM_COLOR_STORAGE_KEY = "codex-rebuild:markdown-bold-custom-color:v1";
+export const BOLD_MODE_STORAGE_KEY = "markdownBoldColorMode";
+export const BOLD_CUSTOM_COLOR_STORAGE_KEY = "markdownBoldCustomColor";
 export const DEFAULT_BOLD_CUSTOM_COLOR = "#7c3aed";
 const STYLE_ID = "codex-rebuild-reading-style";
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
@@ -37,17 +38,17 @@ ${Object.entries({ narrow: 520, feature: 600, compact: 640, wide: 800, xwide: 86
 }
 
 function widthPreference() {
-  const value = localStorage.getItem(STORAGE_KEY) ?? String(MIN_WIDTH_PERCENT);
+  const value = String(readSettings()[STORAGE_KEY]);
   return WIDTHS.includes(value) ? value : String(MIN_WIDTH_PERCENT);
 }
 
 function boldModePreference() {
-  const value = localStorage.getItem(BOLD_MODE_STORAGE_KEY) ?? "default";
+  const value = readSettings()[BOLD_MODE_STORAGE_KEY];
   return BOLD_COLOR_MODES.includes(value) ? value : "default";
 }
 
 function boldCustomColorPreference() {
-  const value = localStorage.getItem(BOLD_CUSTOM_COLOR_STORAGE_KEY) ?? DEFAULT_BOLD_CUSTOM_COLOR;
+  const value = readSettings()[BOLD_CUSTOM_COLOR_STORAGE_KEY];
   return COLOR_PATTERN.test(value) ? value.toLowerCase() : DEFAULT_BOLD_CUSTOM_COLOR;
 }
 
@@ -64,8 +65,7 @@ export function installReadingStyle() {
   if (installed || typeof document === "undefined") return;
   installed = true;
   apply();
-  window.addEventListener("storage", event => {
-    if (![STORAGE_KEY, BOLD_MODE_STORAGE_KEY, BOLD_CUSTOM_COLOR_STORAGE_KEY, null].includes(event.key)) return;
+  window.addEventListener(SETTINGS_CHANGED, () => {
     apply(); window.dispatchEvent(new Event("codex-rebuild-reading-change"));
   });
 }
@@ -104,9 +104,8 @@ export function renderReadingWidth(react, ui, Row, intl) {
           },
           value,
           onChange: event => {
-            const next = event.currentTarget.value;
-            localStorage.setItem(STORAGE_KEY, next); apply(next, boldModePreference()); setValue(next);
-            window.dispatchEvent(new Event("codex-rebuild-reading-change"));
+            const next = Number(event.currentTarget.value);
+            return writeSettings({ [STORAGE_KEY]: next }).catch(reportSettingsError);
           },
         }),
         ui.jsx("output", {
@@ -127,8 +126,7 @@ export function renderReadingWidth(react, ui, Row, intl) {
           value: boldMode,
           onChange: event => {
             const next = event.currentTarget.value;
-            localStorage.setItem(BOLD_MODE_STORAGE_KEY, next); apply(widthPreference(), next); setBoldMode(next);
-            window.dispatchEvent(new Event("codex-rebuild-reading-change"));
+            return writeSettings({ [BOLD_MODE_STORAGE_KEY]: next }).catch(reportSettingsError);
           },
           children: BOLD_COLOR_MODES.map(option => ui.jsx("option", { value: option, children: ({
             default: chinese ? "跟随正文" : "Text color",
@@ -144,9 +142,8 @@ export function renderReadingWidth(react, ui, Row, intl) {
           value: boldColor,
           onChange: event => {
             const next = event.currentTarget.value.toLowerCase();
-            localStorage.setItem(BOLD_CUSTOM_COLOR_STORAGE_KEY, next); localStorage.setItem(BOLD_MODE_STORAGE_KEY, "custom");
-            apply(widthPreference(), "custom", next); setBoldColor(next); setBoldMode("custom");
-            window.dispatchEvent(new Event("codex-rebuild-reading-change"));
+            return writeSettings({ [BOLD_CUSTOM_COLOR_STORAGE_KEY]: next, [BOLD_MODE_STORAGE_KEY]: "custom" })
+              .catch(reportSettingsError);
           },
         }),
       ] }),

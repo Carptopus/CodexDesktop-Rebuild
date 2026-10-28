@@ -20,6 +20,7 @@ const PATCH_POLICY = [
   { script: "patch-codex-home-env.js", feature: "用户配置目录传递" },
   { script: "patch-windows-portable-runtime.js", feature: "Windows 便携运行时" },
   { script: "patch-test-isolation.js", feature: "Windows 验收数据隔离" },
+  { script: "patch-rebuild-settings.js", feature: "独立文件持久化外观偏好" },
   { script: "patch-provider-quota.js", feature: "真实 Provider 额度发送门槛" },
   { script: "patch-api-key-home-navigation.js", feature: "API-key 首页会话恢复" },
   { script: "patch-thread-timeline.js", feature: "按版本能力启用官方会话时间线" },

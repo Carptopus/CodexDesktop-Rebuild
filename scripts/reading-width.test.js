@@ -7,8 +7,27 @@ async function readingModule() {
   return import(pathToFileURL(path.join(__dirname, "runtime", "reading-width.mjs")).href);
 }
 
+const defaults = {
+  readingWidthPercent: 50,
+  markdownBoldColorMode: "default",
+  markdownBoldCustomColor: "#7c3aed",
+  accentPreset: null,
+};
+let snapshot = { ...defaults };
+const listeners = new Set();
+globalThis.electronBridge = { rebuildSettings: {
+  read: () => ({ ...snapshot }),
+  async write(patch) {
+    snapshot = { ...snapshot, ...patch };
+    for (const listener of listeners) listener({ ...snapshot });
+    return { ...snapshot };
+  },
+  onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+} };
+
 test.afterEach(() => {
-  delete globalThis.localStorage;
+  snapshot = { ...defaults };
+  for (const listener of listeners) listener({ ...snapshot });
 });
 
 test("正文宽度提供 50% 到 100% 的 5% 步进", async () => {
@@ -29,13 +48,8 @@ test("所有百分比都保留官方宽度下限且不接受旧 default", async 
   assert.throws(() => readingCss("default"), /未知的正文宽度档位/);
 });
 
-test("外观设置使用范围滑杆并将无效旧值回落到 50%", async () => {
+test("外观设置使用范围滑杆并读取独立配置默认值", async () => {
   const reading = await readingModule();
-  const values = new Map([[reading.STORAGE_KEY, "default"]]);
-  globalThis.localStorage = {
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-  };
   const react = {
     Fragment: Symbol("Fragment"),
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}],

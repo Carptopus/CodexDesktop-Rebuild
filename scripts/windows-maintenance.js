@@ -148,22 +148,25 @@ function saveCompatibilityEvidence(
       const matches = [...signatures, ...functionalSignatures, "settings.appearance.visualStyle", "--thread-content-expanded-max-width", "--markdown-wide-block-max-width"]
         .filter((signature) => text.includes(signature));
       const startupEvidence = label === "main" && /^(?:early-bootstrap|startup-requirements|application-network-startup)/.test(name);
+      const settingsBridgeEvidence = label === "main" &&
+        (text.includes("isTrustedIpcEvent") && text.includes("getContextForWebContents") ||
+          name === "preload.js" && text.includes("electronBridge") && text.includes("exposeInMainWorld"));
       // 新版会在三个入口 chunk 之间移动实现；诊断必须包含共享定义与实际功能块。
       const frontendEvidence = label === "webview" &&
         (/^app-(?:initial|primary|shared)-.*\.js$/.test(name) ||
           name.endsWith(".js") && matches.some(match => functionalSignatures.includes(match)));
-      if (!matches.length && !startupEvidence && !frontendEvidence) continue;
+      if (!matches.length && !startupEvidence && !frontendEvidence && !settingsBridgeEvidence) continue;
       const copied = label === "main" ? require("./patch-updater").auditUpdaterSource(text).length > 0
         : matches.includes("flyoutHeader") || matches.includes("data-model-picker-model-row")
           || matches.includes("data-model-picker-view") && matches.includes("modelListConfig");
       const serviceTierEvidence = matches.includes("serviceTierAccess") &&
         matches.includes("Failed to read service tier for request");
       const readingEvidence = matches.includes("settings.appearance.visualStyle") || name.endsWith(".css") && matches.some(match => match.startsWith("--"));
-      if (copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence) {
+      if (copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence || settingsBridgeEvidence) {
         fs.mkdirSync(path.join(destination, label), { recursive: true });
         fs.copyFileSync(file, path.join(destination, label, name));
       }
-      files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
+      files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence || settingsBridgeEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
     }
   }
 
@@ -318,6 +321,7 @@ async function candidate(options) {
   const applyDirectory = path.join(root, "patch-reports", "windows-apply");
   runScript("patch-all.js", ["win", "--check", "--report", checkDirectory]);
   runScript("patch-all.js", ["win", "--report", applyDirectory]);
+  runScript("settings-persistence-smoke.js", []);
   writeJson(path.join(root, "patch-reports", "frontend-source-checks.json"), require("./frontend-source-smoke").verifyFrontendSource(path.join(root, "src", "win", "_asar", "webview", "assets")));
   runScript("build-from-upstream.js", ["--platform", "win", "--defer-zip"]);
   const reports = { check: readJson(path.join(checkDirectory, "report.json")), apply: readJson(path.join(applyDirectory, "report.json")) };
