@@ -45,7 +45,8 @@ function snapshotOptionalTargets(patch, sourceDir, platform) {
     ? path.join(sourceDir, platform, "_asar", "webview", "assets")
     : path.join(sourceDir, platform, "_asar", ".vite", "build");
   if (!fs.existsSync(directory)) return [];
-  const pattern = patch.rollback === "translations" ? /^zh-CN-.*\.js$/ : /^main(?:-[^.]+)?\.js$/;
+  const pattern = patch.rollback === "translations" ? /^zh-CN-.*\.js$/
+    : /^(?:main|early-bootstrap)(?:-[^.]+)?\.js$/;
   return fs.readdirSync(directory).filter((name) => pattern.test(name)).map((name) => {
     const file = path.join(directory, name);
     return { file, contents: fs.readFileSync(file) };

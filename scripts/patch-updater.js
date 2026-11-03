@@ -46,20 +46,20 @@ function collectPatches(ast, source) {
     if (!UPDATER_METHODS.has(keyName)) return;
 
     const fn = node.value;
-    if (fn?.type !== "FunctionExpression") return;
+    if (!["FunctionExpression", "ArrowFunctionExpression"].includes(fn?.type)) return;
     const body = fn.body;
-    if (!body || body.type !== "BlockStatement") return;
-    if (body.body.length !== 1) return;
-    const ret = body.body[0];
-    if (ret.type !== "ReturnStatement" || !ret.argument) return;
+    const ret = body?.type === "BlockStatement" && body.body.length === 1 ? body.body[0] : null;
+    const argument = body?.type !== "BlockStatement" && fn.type === "ArrowFunctionExpression"
+      ? body : ret?.type === "ReturnStatement" ? ret.argument : null;
+    if (!argument) return;
 
-    const retSrc = source.slice(ret.argument.start, ret.argument.end);
+    const retSrc = source.slice(argument.start, argument.end);
     if (retSrc === "!1") return;
 
     patches.push({
       id: keyName,
-      start: ret.argument.start,
-      end: ret.argument.end,
+      start: argument.start,
+      end: argument.end,
       replacement: "!1",
       original: retSrc.length > 50 ? retSrc.slice(0, 47) + "..." : retSrc,
     });
@@ -78,7 +78,8 @@ function auditUpdaterSource(source) {
     if (!UPDATER_METHODS.has(name)) return;
     const body = node.type === "FunctionDeclaration" ? node.body : node.value?.body;
     const statement = body?.type === "BlockStatement" && body.body.length === 1 ? body.body[0] : null;
-    const result = statement?.type === "ReturnStatement" ? statement.argument : null;
+    const result = node.value?.type === "ArrowFunctionExpression" && body?.type !== "BlockStatement"
+      ? body : statement?.type === "ReturnStatement" ? statement.argument : null;
     const disabled = result?.type === "Literal" && result.value === false
       || result?.type === "UnaryExpression" && result.operator === "!"
         && result.argument?.type === "Literal" && result.argument.value === 1;

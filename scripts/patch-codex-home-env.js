@@ -10,6 +10,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { parse } = require("acorn");
 const { SRC_DIR } = require("./patch-util");
 
 const args = process.argv.slice(2);
@@ -28,10 +29,6 @@ const LEGACY_NEW =
 
 // 新版上游会把 resolved Codex home 作为 codexHome 参数传入启动函数。
 // 函数体一开始补写 process.env.CODEX_HOME，后续 spawn/import 的子进程即可继承。
-const NATIVE_PIPE_START_RE =
-  /(function\s+\w+\(\{codexHome:([A-Za-z_$][\w$]*)=[\s\S]{0,500}?startServer:[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\}\)\{)(?!process\.env\.CODEX_HOME\?\?=)/g;
-const NATIVE_PIPE_PATCHED_RE =
-  /function\s+\w+\(\{codexHome:([A-Za-z_$][\w$]*)=[\s\S]{0,500}?startServer:[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\}\)\{process\.env\.CODEX_HOME\?\?=\1;/;
 
 function countLiteral(src, needle) {
   return src.split(needle).length - 1;
@@ -41,10 +38,6 @@ function patchSource(src, file) {
   if (src.includes(LEGACY_NEW)) {
     return { matched: true, changed: false, source: src, label: "legacy bootstrap already patched" };
   }
-  if (NATIVE_PIPE_PATCHED_RE.test(src)) {
-    return { matched: true, changed: false, source: src, label: "native-pipe bootstrap already patched" };
-  }
-
   const legacyCount = countLiteral(src, LEGACY_OLD);
   if (legacyCount > 0) {
     if (legacyCount !== 1) {
@@ -58,18 +51,36 @@ function patchSource(src, file) {
     };
   }
 
-  const matches = [...src.matchAll(NATIVE_PIPE_START_RE)];
+  // 新版 Webpack 会将工厂内联为匿名函数；按参数契约识别，不能依赖压缩后的函数名。
+  const matches = [];
+  function visit(node) {
+    if (!node || typeof node !== "object") return;
+    if (["FunctionDeclaration", "FunctionExpression"].includes(node.type) && node.params.length === 1 && node.params[0].type === "ObjectPattern") {
+      const props = Object.fromEntries(node.params[0].properties.filter(p => p.type === "Property").map(p => [p.key.name, p.value]));
+      const home = props.codexHome;
+      if (home?.type === "AssignmentPattern" && home.left.type === "Identifier" && ["codexCliPath", "platform", "startServer"].every(key => props[key])) {
+        const body = src.slice(node.body.start + 1, node.body.end - 1);
+        if (!body.includes("windowsHelperPath") || !body.includes("windowsHelperTransportModulePath") || !body.includes("codexHome:")) throw new Error(`Unknown native-pipe startup contract in ${file}`);
+        matches.push({ node, home: home.left.name });
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value?.type) visit(value);
+    }
+  }
+  visit(parse(src, { ecmaVersion: "latest", sourceType: "module" }));
   if (matches.length > 0) {
     if (matches.length !== 1) {
       throw new Error(`Expected one native-pipe Codex home startup marker in ${file}, found ${matches.length}`);
     }
-    NATIVE_PIPE_START_RE.lastIndex = 0;
+    const { node, home } = matches[0];
+    const injection = `process.env.CODEX_HOME??=${home};`;
+    if (src.slice(node.body.start + 1).startsWith(injection)) return { matched: true, changed: false, source: src, label: "native-pipe bootstrap already patched" };
     return {
       matched: true,
       changed: true,
-      source: src.replace(NATIVE_PIPE_START_RE, (_match, prefix, codexHomeVar) => {
-        return `${prefix}process.env.CODEX_HOME??=${codexHomeVar};`;
-      }),
+      source: src.slice(0, node.body.start + 1) + injection + src.slice(node.body.start + 1),
       label: "native-pipe bootstrap",
     };
   }
@@ -115,4 +126,5 @@ function main() {
   console.log(check ? `[check] ${changed} file(s) need patching` : `[done] ${changed} file(s) patched`);
 }
 
-main();
+if (require.main === module) main();
+module.exports = { patchSource };

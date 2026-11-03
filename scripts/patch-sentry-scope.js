@@ -26,7 +26,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { listBuildBundles, relPath } = require("./patch-util");
 
 const MARKER = "__codex_bc_truncated";
 const NATIVE_MARKER = "codex_truncated_breadcrumb_data";
@@ -58,6 +58,70 @@ function hasNativeScopeProtection(code) {
   );
 }
 
+// Webpack 将 sanitizer、Sentry.init 分在不同模块中；验证引用关系而非拼接字符串。
+function inspectNativeScopeProtection(sources) {
+  const modules = new Map();
+  function walk(node, visitor) {
+    if (!node || typeof node !== "object") return;
+    visitor(node);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((child) => walk(child, visitor));
+      else if (value?.type) walk(value, visitor);
+    }
+  }
+  for (const source of sources) {
+    if (!source.includes("scope_v3.json") && !source.includes(NATIVE_MARKER)) continue;
+    const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    walk(ast, (node) => {
+      if (node.type === "Property" && typeof node.key?.value === "number" && node.value?.type === "FunctionExpression") {
+        if (modules.has(node.key.value)) throw new Error(`Sentry: duplicate Webpack module ${node.key.value}`);
+        modules.set(node.key.value, { node: node.value, source });
+      }
+    });
+  }
+  const proofs = [];
+  for (const [id, module] of modules) {
+    const text = module.source.slice(module.node.start, module.node.end);
+    if (!text.includes("scope_v3.json")) continue;
+    // 同一初始化模块必须实际检查 scope 文件尺寸并删除过大文件。
+    if (!/statSync\)\([^)]*\)\.size>2097152/.test(text) || !text.includes("unlinkSync")) continue;
+    const imports = new Map();
+    const requireName = module.node.params[2]?.name;
+    walk(module.node, (node) => {
+      if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init?.type === "CallExpression" &&
+          node.init.callee.name === requireName && typeof node.init.arguments[0]?.value === "number") imports.set(node.id.name, node.init.arguments[0].value);
+    });
+    walk(module.node, (node) => {
+      if (node.type !== "ObjectExpression" || !node.properties.some((p) => p.key?.name === "dsn")) return;
+      const before = node.properties.find((p) => p.key?.name === "beforeBreadcrumb")?.value;
+      if (before?.type !== "MemberExpression") return;
+      const target = modules.get(imports.get(before.object.name));
+      if (!target) return;
+      let sanitizerName;
+      walk(target.node, (property) => {
+        if (property.type === "Property" && property.key?.name === before.property.name && property.value?.type === "ArrowFunctionExpression" && property.value.body.type === "Identifier") sanitizerName = property.value.body.name;
+      });
+      if (!sanitizerName) return;
+      let sanitizer;
+      walk(target.node, (fn) => { if (fn.type === "FunctionDeclaration" && fn.id.name === sanitizerName) sanitizer = fn; });
+      if (!sanitizer) return;
+      const body = target.source.slice(sanitizer.start, sanitizer.end);
+      const functions = new Map();
+      walk(target.node, (fn) => { if (fn.type === "FunctionDeclaration") functions.set(fn.id.name, fn); });
+      const reachable = new Set();
+      function visit(name) {
+        if (reachable.has(name) || !functions.has(name)) return;
+        reachable.add(name);
+        walk(functions.get(name), (call) => { if (call.type === "CallExpression" && call.callee.type === "Identifier") visit(call.callee.name); });
+      }
+      visit(sanitizerName);
+      const reachableText = [...reachable].map((name) => { const fn = functions.get(name); return target.source.slice(fn.start, fn.end); }).join("\n");
+      if (body.includes(NATIVE_MARKER) && /\.data|\{data:/.test(body) && reachableText.includes("JSON.stringify") && reachableText.includes("new TextEncoder().encode") && reachableText.includes("byteLength<=2048")) proofs.push({ moduleId: id, sanitizerModuleId: imports.get(before.object.name), sanitizerName });
+    });
+  }
+  return proofs;
+}
+
 function patchOne(bundlePath, isCheck) {
   const code = fs.readFileSync(bundlePath, "utf-8");
 
@@ -72,9 +136,8 @@ function patchOne(bundlePath, isCheck) {
     return `dsn:${dsnExpr},${OPTS}environment:`;
   });
 
-  if (count === 0) {
-    console.log(`  [!] ${relPath(bundlePath)}: no Sentry init anchor found`);
-    return false;
+  if (count !== 1) {
+    throw new Error(`${relPath(bundlePath)}: expected exactly one Sentry init anchor, found ${count}`);
   }
 
   try {
@@ -86,7 +149,7 @@ function patchOne(bundlePath, isCheck) {
       console.log(
         `  [x] ${relPath(bundlePath)}: post-inject parse failed, aborting (${e2.message})`,
       );
-      return false;
+      throw new Error(`Sentry post-inject parse failed: ${e2.message}`);
     }
   }
 
@@ -111,61 +174,31 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  let patched = 0;
-  let found = 0;
-  const nativeBundles = locateBundles({
-    dir: "build",
-    pattern: /^bootstrap(?:-.*)?\.js$/,
-    platform,
-  }).filter((bundle) =>
-    hasNativeScopeProtection(fs.readFileSync(bundle.path, "utf-8")),
-  );
-  const nativePlatforms = new Set(nativeBundles.map((bundle) => bundle.platform));
-
-  for (const bundle of nativeBundles) {
-    console.log(
-      `  [ok] ${relPath(bundle.path)}: upstream truncates breadcrumb data and bounds scope_v3.json`,
-    );
-  }
-
-  const platforms = platform
-    ? [platform]
-    : ["mac-arm64", "mac-x64", "win"].filter(
-        (item) => !nativePlatforms.has(item),
-      );
-  for (const currentPlatform of platforms) {
-    if (nativePlatforms.has(currentPlatform)) continue;
+  const bundles = listBuildBundles(platform);
+  if (bundles.length === 0) throw new Error("Sentry: no build bundles found");
+  for (const current of new Set(bundles.map((entry) => entry.platform))) {
+    const entries = bundles.filter((entry) => entry.platform === current);
+    const sources = entries.map((entry) => fs.readFileSync(entry.path, "utf8"));
+    const proofs = inspectNativeScopeProtection(sources);
+    if (proofs.length === 1) {
+      console.log(`  [ok] ${current}: upstream scope protection verified: ${JSON.stringify(proofs[0])}`);
+      continue;
+    }
+    if (proofs.length > 1) throw new Error("Sentry: ambiguous upstream scope protection");
+    const native = entries.filter((_entry, index) => hasNativeScopeProtection(sources[index]));
+    if (native.length === 1) {
+      console.log(`  [ok] ${current}: upstream truncates breadcrumb data and bounds scope_v3.json`);
+      continue;
+    }
+    // 保留旧真实布局的 worker 与主初始化两处契约，不把缺失当跳过。
     for (const pattern of TARGETS) {
-      const bundles = locateBundles({
-        dir: "build",
-        pattern,
-        platform: currentPlatform,
-      });
-      for (const bundle of bundles) {
-        found++;
-        if (patchOne(bundle.path, isCheck)) patched++;
-      }
+      const matches = entries.filter((entry) => pattern.test(require("path").basename(entry.path)));
+      if (matches.length !== 1) throw new Error(`Sentry: ${current}: expected one legacy target for ${pattern}, found ${matches.length}`);
+      patchOne(matches[0].path, isCheck);
     }
   }
-
-  if (found === 0 && nativeBundles.length === 0) {
-    console.log("  [skip] no target bundles found");
-    return;
-  }
-
-  console.log(
-    `  [done] native: ${nativeBundles.length}, patched: ${patched} file(s)`,
-  );
 }
 
 if (require.main === module) main();
 
-module.exports = {
-  INIT_RE,
-  MARKER,
-  NATIVE_MARKER,
-  TARGETS,
-  TRIM_FN,
-  hasNativeScopeProtection,
-  patchOne,
-};
+module.exports = { INIT_RE, MARKER, NATIVE_MARKER, TARGETS, TRIM_FN, hasNativeScopeProtection, inspectNativeScopeProtection, patchOne };

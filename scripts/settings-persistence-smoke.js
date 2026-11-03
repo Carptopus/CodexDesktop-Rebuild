@@ -15,7 +15,8 @@ const raw = path.resolve(process.env.RAW_ASAR_DIR || path.join(SRC_DIR, "win", "
 const parent = path.resolve(process.env.REBUILD_SETTINGS_SMOKE_ROOT || os.tmpdir());
 fs.mkdirSync(parent, { recursive: true });
 const root = fs.mkdtempSync(path.join(parent, "settings-persistence-"));
-const generated = path.join(root, "source", "win", "_asar"), build = path.join(generated, ".vite", "build");
+const generated = path.join(root, "source", "win", "_asar");
+let build;
 function walk(node, visit) {
   if (!node || typeof node !== "object") return;
   if (node.type) visit(node);
@@ -25,12 +26,31 @@ function walk(node, visit) {
   }
 }
 async function main() {
+  const manifest = JSON.parse(fs.readFileSync(path.join(raw, "package.json"), "utf8"));
+  assert.equal(typeof manifest.main, "string", "需要真实官方 package.main");
+  const entry = path.resolve(raw, manifest.main), entryRelative = path.relative(raw, entry);
+  assert.ok(entryRelative && entryRelative !== ".." && !entryRelative.startsWith(".." + path.sep) && !path.isAbsolute(entryRelative), "官方入口不能逃出 ASAR");
+  build = path.dirname(path.join(generated, entryRelative));
   fs.mkdirSync(build, { recursive: true }); fs.mkdirSync(path.join(generated, "webview", "assets"), { recursive: true });
   fs.copyFileSync(path.join(raw, "package.json"), path.join(generated, "package.json"));
-  const originalBuild = path.join(raw, ".vite", "build");
-  const names = fs.readdirSync(originalBuild).filter(name => /^main-.*\.js$/.test(name) && fs.readFileSync(path.join(originalBuild, name), "utf8").includes("exports.runMainAppStartup="));
+  const originalBuild = path.dirname(entry);
+  const names = fs.readdirSync(originalBuild).filter(name => {
+    if (!name.endsWith(".js")) return false;
+    const source = fs.readFileSync(path.join(originalBuild, name), "utf8");
+    if (source.includes("exports.runMainAppStartup=")) return true;
+    if (!source.includes("runMainAppStartup")) return false;
+    const exports = [];
+    walk(parse(source, { ecmaVersion: "latest", sourceType: "script" }), node => {
+      if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression" || node.callee.property.name !== "d" || node.arguments.length !== 2 || node.arguments[1].type !== "ObjectExpression") return;
+      for (const property of node.arguments[1].properties) {
+        if (property.type === "Property" && (property.key.name ?? property.key.value) === "runMainAppStartup" && property.value.type === "ArrowFunctionExpression" && property.value.params.length === 0 && property.value.body.type === "Identifier") exports.push(property.value.body.name);
+      }
+    });
+    assert.ok(exports.length <= 1, "官方启动资源导出必须唯一");
+    return exports.length === 1;
+  });
   assert.equal(names.length, 1, "需要唯一的真实官方 main 资源");
-  for (const name of [names[0], "early-bootstrap.js", "preload.js"]) fs.copyFileSync(path.join(originalBuild, name), path.join(build, name));
+  for (const name of new Set([names[0], path.basename(entry), "preload.js"])) fs.copyFileSync(path.join(originalBuild, name), path.join(build, name));
   const patch = (flags, platform = "win") => execFileSync(process.execPath, [path.join(__dirname, "patch-rebuild-settings.js"), ...(platform ? [platform] : []), ...flags], { env: { ...process.env, CODEX_PATCH_SOURCE_DIR: path.join(root, "source") }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const sourceBefore = fs.readFileSync(path.join(build, names[0]));
   patch(["--check"], null); assert.deepEqual(fs.readFileSync(path.join(build, names[0])), sourceBefore, "自动选择现有 Windows 平台且 --check 不写入");
@@ -72,7 +92,7 @@ async function main() {
     };
     ipcRenderer.invoke = (channel, value) => { assert.equal(channel, CHANNELS.write); return handlers.get(channel)(event(), value); };
     const exposed = {}, win = { addEventListener() {}, dispatchEvent() {}, location: { origin: "app://-" } };
-    vm.runInNewContext(patchedPreload, { require(name) { assert.equal(name, "electron"); return { ipcRenderer, contextBridge: { exposeInMainWorld(name, value) { exposed[name] = value; } }, webUtils: {} }; }, window: win, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64" }, console });
+    vm.runInNewContext(patchedPreload, { require(name) { assert.equal(name, "electron"); return { ipcRenderer, contextBridge: { exposeInMainWorld(name, value) { exposed[name] = value; } }, webUtils: {} }; }, module: { exports: {} }, window: win, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64" }, console });
     return { bridge: exposed.electronBridge.rebuildSettings, sender, destroy() { sender.destroyed = true; sender.emit("destroyed"); } };
   }
   const a = renderer(), b = renderer(), outsider = renderer({ allowed: false }), subframe = renderer({ frame: false });

@@ -31,6 +31,24 @@ function findSidebarTarget(directory) {
   return unique(candidates, "原生头像侧栏资源");
 }
 
+function usageAssignments(ast, fetchName) {
+  const isQuery = argument => nodes(argument, node => node.type === "ObjectExpression" &&
+    props(node).refetchInterval && props(node).queryFn && nodes(props(node).queryFn, call =>
+      call.type === "CallExpression" && call.callee.type === "Identifier" &&
+      call.callee.name === fetchName).length > 0).length > 0;
+  return nodes(ast, node => node.type === "AssignmentExpression" && node.operator === "=" &&
+    node.left.type === "Identifier" && node.right.type === "CallExpression" &&
+    node.right.arguments.some(argument => {
+      if (argument.type === "ArrowFunctionExpression") return isQuery(argument);
+      // 26.1027 的 automatic 查询工厂与 usage-settings 共享实现；只订阅前者。
+      if (argument.type !== "CallExpression" || argument.callee.type !== "Identifier" ||
+          argument.arguments.length !== 1 || literal(argument.arguments[0]) !== "automatic") return false;
+      const factory = ast.body.filter(item => item.type === "FunctionDeclaration" &&
+        item.id.name === argument.callee.name);
+      return factory.length === 1 && isQuery(factory[0]);
+    }));
+}
+
 function analyze(source, ast, relatedSources = []) {
   const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
     contains(source, node, "codex.profileFooter.settingsFallback") &&
@@ -74,16 +92,7 @@ function analyze(source, ast, relatedSources = []) {
     nodes(node, child => literal(child) === "/wham/usage").length > 0);
   if (usageFetch.length) {
     const fetch = unique(usageFetch, "官方额度请求");
-    usageAtom = unique(nodes(ast, node => node.type === "AssignmentExpression" &&
-      node.operator === "=" && node.left.type === "Identifier" && node.right.type === "CallExpression" &&
-      node.right.arguments.some(argument => {
-        if (argument.type !== "ArrowFunctionExpression") return false;
-        const returned = argument.body.type === "BlockStatement" ? argument.body.body.at(-1) : null;
-        const options = props(returned?.type === "ReturnStatement" ? returned.argument : argument.body);
-        return options.refetchInterval && options.queryFn && nodes(options.queryFn, call =>
-          call.type === "CallExpression" && call.callee.type === "Identifier" &&
-          call.callee.name === fetch.id.name).length > 0;
-      })), "共享额度查询");
+    usageAtom = unique(usageAssignments(ast, fetch.id.name), "共享额度查询");
     initialize = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
       node.start < usageAtom.start && node.end > usageAtom.end), "额度查询初始化器");
   } else {
@@ -91,16 +100,7 @@ function analyze(source, ast, relatedSources = []) {
       const relatedAst = parse(related.source, { ecmaVersion: "latest", sourceType: "module" });
       const fetch = unique(relatedAst.body.filter(node => node.type === "FunctionDeclaration" &&
         nodes(node, child => literal(child) === "/wham/usage").length > 0), "共享官方额度请求");
-      const assignments = nodes(relatedAst, node => node.type === "AssignmentExpression" &&
-        node.operator === "=" && node.left.type === "Identifier" && node.right.type === "CallExpression" &&
-        node.right.arguments.some(argument => {
-          if (argument.type !== "ArrowFunctionExpression") return false;
-          const returned = argument.body.type === "BlockStatement" ? argument.body.body.at(-1) : null;
-          const options = props(returned?.type === "ReturnStatement" ? returned.argument : argument.body);
-          return options.refetchInterval && options.queryFn && nodes(options.queryFn, call =>
-            call.type === "CallExpression" && call.callee.type === "Identifier" &&
-            call.callee.name === fetch.id.name).length > 0;
-        }));
+      const assignments = usageAssignments(relatedAst, fetch.id.name);
       const atom = unique(assignments, "共享账户额度 Atom");
       const initializer = unique(relatedAst.body.filter(node => node.type === "FunctionDeclaration" &&
         node.start < atom.start && node.end > atom.end), "共享账户额度初始化器");

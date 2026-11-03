@@ -6,12 +6,13 @@ const { parse } = require("acorn");
 const { SRC_DIR } = require("./patch-util");
 const environmentModule = "codex-rebuild-test-environment.cjs";
 const isolationModule = "codex-rebuild-test-isolation.cjs";
-function walk(node, visit, parent) {
+function walk(node, visit, parent, ancestors = []) {
   if (!node || typeof node !== "object") return;
-  if (node.type) visit(node, parent);
+  if (node.type) visit(node, parent, ancestors);
+  const parents = node.type ? [...ancestors, node] : ancestors;
   for (const value of Object.values(node)) {
-    if (Array.isArray(value)) value.forEach(child => walk(child, visit, node));
-    else if (value?.type) walk(value, visit, node);
+    if (Array.isArray(value)) value.forEach(child => walk(child, visit, node, parents));
+    else if (value?.type) walk(value, visit, node, parents);
   }
 }
 function literal(node) { return node?.type === "Literal" ? node.value : node?.type === "TemplateLiteral" && !node.expressions.length ? node.quasis[0].value.cooked : undefined; }
@@ -31,8 +32,8 @@ function main() {
   const add = (file, edit) => { const list = edits.get(file) || []; list.push(edit); edits.set(file, list); };
   if (entrySource.includes("Desktop network requirements prevented startup") && !entrySource.includes("native-startup-error.json")) {
     const catches = [];
-    walk(entryAst, node => {
-      if (node.type === "ArrowFunctionExpression" && node.body.type === "BlockStatement" && sourceOf(node).includes("Desktop network requirements prevented startup")) catches.push(node);
+    walk(entryAst, (node, parent) => {
+      if (node.type === "ArrowFunctionExpression" && node.body.type === "BlockStatement" && parent?.type === "CallExpression" && parent.callee.type === "MemberExpression" && parent.callee.property.name === "catch" && parent.arguments[0] === node && sourceOf(node).includes("Desktop network requirements prevented startup")) catches.push(node);
     });
     function sourceOf(node) { return entrySource.slice(node.start, node.end); }
     if (catches.length !== 1 || catches[0].params[0]?.type !== "Identifier" || mode(entry)) throw new Error("官方启动失败处理结构未知");
@@ -52,18 +53,25 @@ function main() {
     const file = path.join(build, name), source = fs.readFileSync(file, "utf8");
     if (!source.includes("CODEX_ELECTRON_USER_DATA_PATH") || !source.includes("requestSingleInstanceLock")) continue;
     const ast = astOf(source, mode(file)), calls = [], locks = [];
-    walk(ast, (node, parent) => {
+    walk(ast, (node, parent, ancestors) => {
       if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
-      if (node.callee.property.name === "setPath" && literal(node.arguments[0]) === "userData" && node.arguments[1]?.type === "CallExpression") calls.push({ node, parent });
-      if (node.callee.property.name === "requestSingleInstanceLock") locks.push(node);
+      const owner = ancestors.findLast(parent => ["FunctionExpression", "FunctionDeclaration", "ArrowFunctionExpression"].includes(parent.type));
+      if (node.callee.property.name === "setPath" && literal(node.arguments[0]) === "userData" && node.arguments[1]?.type === "CallExpression") calls.push({ node, parent, scope: owner?.body ?? ast });
+      if (node.callee.property.name === "requestSingleInstanceLock") locks.push({ node, scope: owner?.body ?? ast });
     });
     if (calls.length !== 1 || calls[0].parent.type !== "SequenceExpression") throw new Error(`官方 User Data 初始化结构未知：${name}`);
     const call = calls[0].node;
-    const startupLocks = locks.filter(lock => lock.start > call.end && ast.body.some(statement => statement.type === "IfStatement" && statement.start <= lock.start && statement.end >= lock.end)
-      || lock.start > call.end && ast.body.some(statement => statement.type === "ExpressionStatement" && statement.start <= lock.start && statement.end >= lock.end));
+    const scope = calls[0].scope;
+    const startupLocks = locks.filter(({ node: lock, scope: lockScope }) => lockScope === scope && lock.start > call.end && source.slice(lock.callee.object.start, lock.callee.object.end) === source.slice(call.callee.object.start, call.callee.object.end) && scope.body.some(statement => ["IfStatement", "ExpressionStatement"].includes(statement.type) && statement.start <= lock.start && statement.end >= lock.end));
     if (startupLocks.length !== 1) throw new Error("官方启动单实例锁缺失或不唯一");
-    const resolver = ast.body.find(node => node.type === "FunctionDeclaration" && node.id.name === call.arguments[1].callee.name);
+    const resolverCall = call.arguments[1];
+    const resolver = resolverCall.callee.type === "FunctionExpression" ? resolverCall.callee : scope.body.find(node => node.type === "FunctionDeclaration" && node.id.name === resolverCall.callee.name);
     if (!resolver || !source.slice(resolver.start, resolver.end).includes("CODEX_ELECTRON_USER_DATA_PATH")) throw new Error("官方 User Data 环境解析结构未知");
+    if (resolverCall.callee.type === "FunctionExpression") {
+      const argument = resolverCall.arguments[0];
+      const env = argument?.type === "ObjectExpression" && argument.properties.find(prop => prop.type === "Property" && (prop.key.name ?? prop.key.value) === "env")?.value;
+      if (env?.type !== "MemberExpression" || env.object.name !== "process" || env.property.name !== "env") throw new Error("官方内联 User Data 未采用进程环境");
+    }
     const hook = mode(file) ? `await import("./${isolationModule}")` : `require("./${isolationModule}")`;
     if (!source.includes(isolationModule)) add(file, { at: call.end, text: `,${hook}` });
     else if (!source.slice(call.end).startsWith(`,${hook}`)) throw new Error("隔离模块未紧邻官方 User Data 设置");

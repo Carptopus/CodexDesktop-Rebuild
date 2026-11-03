@@ -191,6 +191,15 @@ async function main() {
   assert.equal(render(), fallback); assert.equal(state.reads, 0, "API 模式不挂载官方额度订阅");
   state.auth = baseAuth; assert.equal(render(true, true), fallback); assert.equal(state.reads, 0);
   if (source === fixture) {
+    const factory = fixture.replace(
+      'function initialize(){usageAtom=query(null,()=>{return{queryFn:()=>fetchUsage(),refetchInterval:()=>30000}})}',
+      'function options(mode){return()=>({queryFn:()=>fetchUsage(),refetchInterval:()=>30000})}function initialize(){usageAtom=query(null,options("automatic"),pushSubscription);settingsAtom=query(null,options("usage-settings"))}');
+    const factoryResult = patchSource(factory);
+    assert.equal(factoryResult.status, "patched", factoryResult.reason);
+    assert.equal(patchSource(factoryResult.source).status, "already-patched");
+    assert.match(factoryResult.source, /usage=read\(usageAtom\)/);
+    assert.equal(patchSource(factory.replace('options("automatic")', 'options("usage-settings")')).status, "unexpected-shape",
+      "不能把设置页查询当成常驻共享查询");
     const rail = `function Rail(){const profile=jsx(Profile,{compact:true,hideUsage:enabled});const entry=enabled&&jsx(UsageMenu,{currentAccount:account,usage:usage,fallback:null,children:(data,actions)=>jsx(LazyUsage,{menu:data.menu,source:data.source,usage:usage,actions:actions})});return jsx(Layout,{leading:profile,trailing:entry})}`;
     const patched = patchSource(fixture + rail);
     assert.equal(patched.status, "patched", patched.reason);

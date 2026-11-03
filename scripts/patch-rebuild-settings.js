@@ -26,12 +26,24 @@ function properties(node) {
 function patchMain(source) {
   const matches = [];
   walk(ast(source), (node, parents) => {
-    if (node.type !== "CallExpression" || node.callee.type !== "Identifier" || node.arguments.length !== 1) return;
+    if (node.type !== "CallExpression" || !["Identifier", "FunctionExpression"].includes(node.callee.type) || node.arguments.length !== 1) return;
     const props = properties(node.arguments[0]);
     if (!["buildFlavor", "getContextForWebContents", "isTrustedIpcEvent"].every(name => props[name])) return;
     if (props.isTrustedIpcEvent.type !== "Identifier" || props.getContextForWebContents.type !== "MemberExpression") throw new Error("官方可信 IPC 注册参数结构未知");
+    if (node.callee.type === "FunctionExpression") {
+      const registration = source.slice(node.callee.start, node.callee.end);
+      if (!registration.includes("ipcMain.on(") || !registration.includes("returnValue")) throw new Error("官方内联可信 IPC 注册结构未知");
+    }
     const owner = parents.findLast(parent => ["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(parent.type));
     if (!owner) throw new Error("官方可信 IPC 注册不在真实启动函数内");
+    if (node.callee.type === "FunctionExpression") {
+      const validators = [];
+      walk(owner.body, child => {
+        if (child.type === "VariableDeclarator" && child.id.name === props.isTrustedIpcEvent.name && child.end < node.start && child.init?.type === "ArrowFunctionExpression" && child.init.body.type === "CallExpression") validators.push(child.init.body);
+      });
+      const validator = validators[0];
+      if (validators.length !== 1 || validator.callee.type !== "MemberExpression" || key(validator.callee.property) !== "isTrustedIpcSender" || source.slice(validator.callee.object.start, validator.callee.object.end) !== source.slice(props.getContextForWebContents.object.start, props.getContextForWebContents.object.end)) throw new Error("官方内联 IPC 缺少同窗口上下文可信校验");
+    }
     const homes = [];
     walk(owner.body, child => {
       if (child.type !== "VariableDeclarator" || child.id.type !== "Identifier" || child.init?.type !== "AwaitExpression" || child.init.argument.type !== "CallExpression") return;
@@ -61,10 +73,10 @@ function patchPreload(source) {
   if (exposures.length !== 1) throw new Error("官方 electronBridge 暴露点缺失或不唯一");
   const exposure = exposures[0], bridge = exposure.arguments[1];
   const electron = exposure.callee.object;
-  if (bridge?.type !== "Identifier" || electron?.type !== "MemberExpression" || key(electron.property) !== "contextBridge" || electron.object.type !== "Identifier") throw new Error("官方 preload contextBridge 结构未知");
+  if (!["Identifier", "ObjectExpression"].includes(bridge?.type) || electron?.type !== "MemberExpression" || key(electron.property) !== "contextBridge" || electron.object.type !== "Identifier") throw new Error("官方 preload contextBridge 结构未知");
   const symbol = electron.object.name;
   const imports = declarations.filter(node => node.id.name === symbol && node.init?.type === "CallExpression" && node.init.callee.name === "require" && literal(node.init.arguments[0]) === "electron");
-  const objects = declarations.filter(node => node.id.name === bridge.name && node.init?.type === "ObjectExpression");
+  const objects = bridge.type === "ObjectExpression" ? [{ init: bridge }] : declarations.filter(node => node.id.name === bridge.name && node.init?.type === "ObjectExpression");
   if (imports.length !== 1 || objects.length !== 1) throw new Error("官方 preload Electron 依赖或桥对象缺失");
   const object = objects[0].init, props = properties(object);
   if (!["sendMessageFromView", "getSystemThemeVariant", "getSharedObjectSnapshotValue"].every(name => props[name])) throw new Error("官方 preload 桥缺少必要通信契约");
@@ -97,7 +109,20 @@ function main() {
     if (actualRelative === ".." || actualRelative.startsWith(".." + path.sep) || path.isAbsolute(actualRelative)) throw new Error(`[${platform}] 官方 package.main 实际目标逃出 ASAR`);
     const build = path.dirname(entry), assets = path.join(root, "webview", "assets");
     if (!fs.statSync(assets).isDirectory()) throw new Error(`[${platform}] 官方 webview 资源缺失`);
-    const names = fs.readdirSync(build).filter(name => name.endsWith(".js") && fs.readFileSync(path.join(build, name), "utf8").includes("exports.runMainAppStartup="));
+    const names = fs.readdirSync(build).filter(name => {
+      if (!name.endsWith(".js")) return false;
+      const source = fs.readFileSync(path.join(build, name), "utf8");
+      if (source.includes("exports.runMainAppStartup=")) return true;
+      if (!source.includes("runMainAppStartup")) return false;
+      let exports = 0;
+      walk(ast(source), node => {
+        if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression" || key(node.callee.property) !== "d" || node.arguments.length !== 2) return;
+        const startup = properties(node.arguments[1]).runMainAppStartup;
+        if (startup?.type === "ArrowFunctionExpression" && startup.params.length === 0 && startup.body.type === "Identifier") exports++;
+      });
+      if (exports > 1) throw new Error(`[${platform}] 官方 main 启动导出不唯一`);
+      return exports === 1;
+    });
     if (names.length !== 1) throw new Error(`[${platform}] 官方 main 启动资源缺失或不唯一`);
     const mainFile = path.join(build, names[0]), preloadFile = path.join(build, "preload.js");
     return { platform, build, assets, mainFile, preloadFile, mainSource: patchMain(fs.readFileSync(mainFile, "utf8")), preloadSource: patchPreload(fs.readFileSync(preloadFile, "utf8")) };

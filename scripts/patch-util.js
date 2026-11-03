@@ -84,4 +84,27 @@ function relPath(absPath) {
   return path.relative(PROJECT_ROOT, absPath);
 }
 
-module.exports = { locateBundles, relPath, SRC_DIR, PROJECT_ROOT };
+// 主进程已拆成 Webpack 数值 chunk；按功能锚点定位，不能任选文件名首项。
+function listBuildBundles(platform) {
+  const roots = platform ? [platform] : ["mac-arm64", "mac-x64", "win"];
+  const dirs = roots.map((p) => ({ platform: p, path: path.join(SRC_DIR, p, "_asar", ".vite", "build") }))
+    .filter((entry) => fs.existsSync(entry.path));
+  if (!platform && dirs.length === 0) {
+    const legacy = path.join(SRC_DIR, ".vite", "build");
+    if (fs.existsSync(legacy)) dirs.push({ platform: "legacy", path: legacy });
+  }
+  return dirs.flatMap((entry) => fs.readdirSync(entry.path).filter((name) => name.endsWith(".js"))
+    .map((name) => ({ platform: entry.platform, path: path.join(entry.path, name) })));
+}
+
+function locateBuildFeatureBundles({ platform, label, match }) {
+  const candidates = listBuildBundles(platform);
+  if (candidates.length === 0) throw new Error(`${label}: no build bundles found`);
+  return [...new Set(candidates.map((entry) => entry.platform))].map((current) => {
+    const matches = candidates.filter((entry) => entry.platform === current && match(fs.readFileSync(entry.path, "utf8")));
+    if (matches.length !== 1) throw new Error(`${label}: ${current}: expected exactly 1 functional bundle, found ${matches.length}`);
+    return matches[0];
+  });
+}
+
+module.exports = { locateBundles, listBuildBundles, locateBuildFeatureBundles, relPath, SRC_DIR, PROJECT_ROOT };

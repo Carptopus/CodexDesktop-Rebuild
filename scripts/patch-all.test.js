@@ -44,7 +44,7 @@ test("真实 updater 补丁的预检查不修改资源，应用后关闭更新",
 
 test("可选版权补丁失败时保留上游文件，严格模式阻止继续", (t) => {
   const root = fixture(t);
-  const first = "const broken=;";
+  const first = 'const about={copyright:"© OpenAI"};const broken=;';
   const firstFile = write(root, ".vite/build/main-a.js", first);
   const reportDir = path.join(root, "report");
   const options = { platform: "win", sourceDir: root, reportDir, policy: policy("patch-copyright.js"), log: () => {} };
@@ -68,10 +68,26 @@ test("可选版权补丁失败时保留上游文件，严格模式阻止继续",
   assert.equal(updater.shouldIncludeUpdater(), false);
 });
 
+test("新版箭头 updater 门槛在真实 CLI 应用后关闭且审计通过", t => {
+  const root = fixture(t);
+  const source = 'const updater={shouldIncludeWindowsUpdater:(plan,host)=>host==="win32",shouldIncludeWindowsMsixUpdater:()=>true,shouldIncludeUpdater:()=>true};';
+  const file = write(root, ".vite/build/early-bootstrap.js", source);
+  const options = { platform: "win", sourceDir: root, policy: policy("patch-updater.js"), log: () => {} };
+  assert.equal(runPatches(options).canBuild, true);
+  const updated = fs.readFileSync(file, "utf8");
+  const updater = Function(`${updated};return updater`)();
+  assert.equal(updater.shouldIncludeWindowsUpdater("pro", "win32"), false);
+  assert.equal(updater.shouldIncludeWindowsMsixUpdater(), false);
+  assert.equal(updater.shouldIncludeUpdater(), false);
+  assert.ok(require("./patch-updater").auditUpdaterSource(updated).every(item => item.disabled));
+  assert.equal(runPatches(options).canBuild, true);
+  assert.equal(fs.readFileSync(file, "utf8"), updated);
+});
+
 test("可选补丁已写文件但报告写入失败时回滚并阻止构建", (t) => {
   const root = fixture(t);
   const source = "const about={copyright:'© OpenAI'};";
-  const file = write(root, ".vite/build/main-test.js", source);
+  const file = write(root, ".vite/build/early-bootstrap-499-test.js", source);
   const reportDir = path.join(root, "report");
   fs.mkdirSync(path.join(reportDir, "logs", "win-patch-copyright.js.log"), { recursive: true });
 

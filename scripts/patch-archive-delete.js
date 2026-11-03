@@ -17,7 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const acorn = require("acorn");
 const { key, literal, nodes } = require("./patch-ast-util");
-const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const { locateBundles, listBuildBundles, relPath, SRC_DIR } = require("./patch-util");
 
 function walkArchive(node, visitor) {
   if (!node || typeof node !== "object") return;
@@ -145,6 +145,23 @@ function locateArchivedProviderBundles(platform) {
     }
   }
   return bundles.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function locateDataControlsBundles(platform) {
+  const platforms = platform ? [platform] : ["mac-arm64", "mac-x64", "win"].filter(name =>
+    fs.existsSync(path.join(SRC_DIR, name, "_asar", "webview", "assets")));
+  const roots = platforms.length ? platforms.map(name => ({ platform: name,
+    dir: path.join(SRC_DIR, name, "_asar", "webview", "assets") })) :
+    [{ platform: "legacy", dir: path.join(SRC_DIR, "webview", "assets") }];
+  return roots.flatMap(root => {
+    if (!fs.existsSync(root.dir)) return [];
+    const matches = fs.readdirSync(root.dir).filter(name => /^data-controls-.*\.js$/.test(name))
+      .map(name => ({ platform: root.platform, path: path.join(root.dir, name) }))
+      .filter(bundle => { const source = fs.readFileSync(bundle.path, "utf-8");
+        return source.includes("archivedThread") && source.includes("archived-threads"); });
+    if (matches.length !== 1) throw new Error(`[${root.platform}] expected exactly 1 archived data-controls bundle, found ${matches.length}`);
+    return matches;
+  });
 }
 
 function patchArchivedProviderQueries(bundles, isCheck) {
@@ -313,7 +330,7 @@ function destructuredPropertyBinding(fn, propertyName) {
   return bindings.length === 1 ? bindings[0] : null;
 }
 
-function inspectRowMutationLink(ast, mutationFunction, rowFunctions, deleteProps) {
+function inspectRowMutationLink(ast, mutationFunction, rowFunctions, deleteProps, requireBulk = false) {
   const statePairs = nodes(mutationFunction, node => node.type === "VariableDeclarator" &&
     node.id?.type === "ArrayPattern" && node.id.elements.length >= 2 &&
     node.id.elements[0]?.type === "Identifier" && node.id.elements[1]?.type === "Identifier" &&
@@ -335,6 +352,11 @@ function inspectRowMutationLink(ast, mutationFunction, rowFunctions, deleteProps
         nodes({ type: "Arguments", values: call.arguments }, node =>
           node.type === "Identifier" && node.name === state.value).length > 0).length > 0;
       if (!mutatesState || !clearsState) continue;
+      if (requireBulk && !nodes(mutationFunction, node => node.type === "Property" &&
+        key(node.key) === "onClick" && nodes(node.value, call => call.type === "CallExpression" &&
+          call.callee?.type === "Identifier" && call.callee.name === state.setter &&
+          nodes(call, item => item.type === "Property" && key(item.key) === "kind" &&
+            literal(item.value) === "all").length === 1).length === 1).length) continue;
 
       const openDeleteProps = nodes(mutationFunction, node => node.type === "ObjectExpression" &&
         objectProperty(node, "onDelete")?.value != null &&
@@ -414,9 +436,45 @@ function handlesDeletedNotification(fn) {
   return false;
 }
 
-function inspectNativeArchiveDelete(code, protocolCode) {
+// Verify both archived-thread service methods reach the exported deletion path.
+function hasSplitMainDeleteChain(mainAst, serviceAst) {
+  const functions = nodes(mainAst, node => node.type === "FunctionDeclaration" && node.id);
+  const callsName = (fn, name) => nodes(fn.body, call => call.type === "CallExpression" &&
+    call.callee?.type === "Identifier" && call.callee.name === name).length > 0;
+  const deleteFns = functions.filter(fn => nodes(fn.body, call => call.type === "CallExpression" &&
+    memberName(call.callee) === "sendAppServerRequest" && literal(call.arguments[0]) === "thread/delete").length > 0);
+  if (deleteFns.length !== 1) return false;
+  const batchFns = functions.filter(fn => callsName(fn, deleteFns[0].id.name));
+  if (batchFns.length !== 1) return false;
+  const entryFns = functions.filter(fn => callsName(fn, batchFns[0].id.name));
+  if (entryFns.length !== 2) return false;
+  const exports = new Map();
+  for (const fn of entryFns) {
+    const properties = nodes(mainAst, node => node.type === "Property" &&
+      node.value?.type === "ArrowFunctionExpression" && node.value.body?.type === "Identifier" &&
+      node.value.body.name === fn.id.name);
+    if (properties.length !== 1) return false;
+    exports.set(fn.id.name, key(properties[0].key));
+  }
+  const serviceMethods = nodes(serviceAst, node => node.type === "MethodDefinition" &&
+    ["deleteArchivedThread", "deleteAllArchivedThreads"].includes(key(node.key)));
+  if (serviceMethods.length !== 2) return false;
+  const used = new Set();
+  for (const method of serviceMethods) {
+    const hits = [...exports.values()].filter(name => nodes(method.value.body, call =>
+      call.type === "CallExpression" && nodes(call.callee, member =>
+        member.type === "MemberExpression" && memberName(member) === name).length > 0).length > 0);
+    if (hits.length !== 1 || used.has(hits[0])) return false;
+    used.add(hits[0]);
+  }
+  return true;
+}
+
+function inspectNativeArchiveDelete(code, protocolCode, runtimeCode = protocolCode, mainCode = protocolCode, serviceCode = null) {
   const ast = acorn.parse(code, { ecmaVersion: "latest", sourceType: "module" });
   const protocolAst = acorn.parse(protocolCode, { ecmaVersion: "latest", sourceType: "module" });
+  const runtimeAst = runtimeCode === protocolCode ? protocolAst : acorn.parse(runtimeCode, { ecmaVersion: "latest", sourceType: "module" });
+  const mainAst = mainCode === protocolCode ? protocolAst : acorn.parse(mainCode, { ecmaVersion: "latest", sourceType: "module" });
 
   const mutationFunctions = inspectMutationChain(ast, code);
   if (mutationFunctions.length !== 1) return null;
@@ -450,12 +508,13 @@ function inspectNativeArchiveDelete(code, protocolCode) {
     mutationFunctions[0],
     rowFunctions,
     deleteProps,
+    serviceCode != null,
   );
   if (linkedDeleteProps.length < 1) return null;
 
   const managerChains = inspectManagerDeleteChain(protocolAst);
   if (managerChains.length !== 1) return null;
-  const runtimeDeletes = nodes(protocolAst, node =>
+  const runtimeDeletes = nodes(runtimeAst, node =>
     (node.type === "Property" || node.type === "MethodDefinition") &&
       key(node.key) === "deleteArchivedThreads");
   if (runtimeDeletes.length !== 1) return null;
@@ -463,14 +522,14 @@ function inspectNativeArchiveDelete(code, protocolCode) {
     ["deleteArchivedThread", "deleteAllArchivedThreads"].includes(memberName(node.callee)));
   const runtimeReceivers = new Map();
   for (const call of runtimeCalls) {
-    const receiver = receiverSource(protocolCode, call);
+    const receiver = receiverSource(runtimeCode, call);
     if (receiver == null) continue;
     if (!runtimeReceivers.has(receiver)) runtimeReceivers.set(receiver, new Set());
     runtimeReceivers.get(receiver).add(memberName(call.callee));
   }
   if (![...runtimeReceivers.values()].some(methods => methods.has("deleteArchivedThread") &&
       methods.has("deleteAllArchivedThreads"))) return null;
-  const protocolMethods = nodes(protocolAst, node =>
+  const protocolMethods = nodes(mainAst, node =>
     (node.type === "FunctionDeclaration" || node.type === "FunctionExpression" ||
       node.type === "ArrowFunctionExpression") &&
     nodes(node, call => call.type === "CallExpression" &&
@@ -481,6 +540,8 @@ function inspectNativeArchiveDelete(code, protocolCode) {
       node.type === "ArrowFunctionExpression") &&
     handlesDeletedNotification(node));
   if (protocolMethods.length < 1 || deleteNotifications.length < 1) return null;
+  if (serviceCode != null && !hasSplitMainDeleteChain(mainAst,
+    acorn.parse(serviceCode, { ecmaVersion: "latest", sourceType: "module" }))) return null;
 
   return {
     deleteProps: linkedDeleteProps.length,
@@ -489,9 +550,9 @@ function inspectNativeArchiveDelete(code, protocolCode) {
   };
 }
 
-function hasNativeArchiveDelete(code, protocolCode = code) {
+function hasNativeArchiveDelete(code, protocolCode = code, runtimeCode = protocolCode, mainCode = protocolCode, serviceCode = null) {
   try {
-    return inspectNativeArchiveDelete(code, protocolCode) != null;
+    return inspectNativeArchiveDelete(code, protocolCode, runtimeCode, mainCode, serviceCode) != null;
   } catch {
     return false;
   }
@@ -777,11 +838,7 @@ function main() {
     isCheck,
   );
 
-  const dataControlsBundles = locateBundles({
-    dir: "assets",
-    pattern: /^data-controls-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  });
+  const dataControlsBundles = locateDataControlsBundles(platform);
   const protocolBundles = locateBundles({
     dir: "assets",
     pattern: /^app-initial-.*\.js$/,
@@ -794,11 +851,26 @@ function main() {
     }
     protocolByPlatform.set(bundle.platform, fs.readFileSync(bundle.path, "utf-8"));
   }
+  const runtimeBundles = locateBundles({
+    dir: "assets", pattern: /^renderer-app-server-managers-.*\.js$/,
+    ...(platform ? { platform } : {}),
+  });
+  const buildBundles = listBuildBundles(platform);
   const nativeBundles = dataControlsBundles.filter((bundle) => {
     const protocolCode = protocolByPlatform.get(bundle.platform);
-    return protocolCode != null && hasNativeArchiveDelete(
-      fs.readFileSync(bundle.path, "utf-8"), protocolCode,
-    );
+    if (protocolCode == null) return false;
+    const uiCode = fs.readFileSync(bundle.path, "utf-8");
+    if (hasNativeArchiveDelete(uiCode, protocolCode)) return true;
+    const runtimes = runtimeBundles.filter(item => item.platform === bundle.platform);
+    const mains = buildBundles.filter(item => item.platform === bundle.platform &&
+      fs.readFileSync(item.path, "utf-8").includes('sendAppServerRequest("thread/delete"'));
+    const services = buildBundles.filter(item => item.platform === bundle.platform &&
+      (() => { const source = fs.readFileSync(item.path, "utf-8");
+        return source.includes("deleteArchivedThread(") && source.includes("deleteAllArchivedThreads("); })());
+    if (runtimes.length !== 1 || mains.length !== 1 || services.length !== 1) return false;
+    return hasNativeArchiveDelete(uiCode, protocolCode,
+      fs.readFileSync(runtimes[0].path, "utf-8"), fs.readFileSync(mains[0].path, "utf-8"),
+      fs.readFileSync(services[0].path, "utf-8"));
   });
   const nativePlatforms = new Set(nativeBundles.map((bundle) => bundle.platform));
 
@@ -850,6 +922,8 @@ module.exports = {
   analyzeArchivedListProviders,
   hasNativeArchiveDelete,
   inspectNativeArchiveDelete,
+  hasSplitMainDeleteChain,
+  inspectRowMutationLink,
   patchAppMain,
   patchArchivedListProviders,
   patchArchivedProviderQueries,
