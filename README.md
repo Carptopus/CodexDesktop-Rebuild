@@ -52,7 +52,7 @@ pnpm run build:all
 - `patch-accent-presets.js` 允许没有 ChatGPT 账户主题的 API-key / 自定义 Provider 在本地选择强调色，并复用官方完整预设渲染消息气泡等界面变量；账户主题仍在加载时保持禁用，账户可用时继续使用官方同步。
 - `patch-hide-pet-menu.js` 只隐藏账户菜单中的 Pet / Mini 入口，保留浮动面板实现、状态和全局快捷键。
 - `patch-hide-invite-menu.js` 隐藏账户菜单中的“邀请好友 / 邀请同事”入口。
-- `patch-sidebar-usage.js` 在 ChatGPT 登录时以剩余额度圆环和百分比替换侧栏头像，复用官方额度查询和刷新机制，点击仍打开原账户菜单。
+- `patch-sidebar-usage.js` 在 ChatGPT 登录时以剩余额度圆环和数字替换侧栏头像，隐藏官方独立额度入口，使用官方圆环主题配色；复用官方额度查询和刷新机制，点击仍打开原账户菜单。
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
 - `patch-rebuild-settings.js` 将正文宽度、Markdown 粗体颜色和本地强调色预设保存到 `CODEX_HOME/codex-rebuild-settings.json`，独立于程序目录与浏览器 User Data；通过限定的可信 IPC 读取和保存，不读取或迁移旧 localStorage。官方账户主题仍由官方管理。
 - `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。

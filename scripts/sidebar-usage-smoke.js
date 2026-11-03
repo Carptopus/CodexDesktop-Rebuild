@@ -38,7 +38,7 @@ async function main() {
       relatedSources = [{ name: initial, source: fs.readFileSync(path.join(assets, initial), "utf8") }];
     }
     origin = `${assets}:${target.name}`;
-  } else if (args[0] === "--asar" && args.length === 2) {
+  } else if (["--asar", "--source-asar"].includes(args[0]) && args.length === 2) {
     const asar = await import("@electron/asar");
     const files = asar.listPackage(args[1]);
     const candidates = files.filter(name => /app-(?:primary|initial)-[^/\\]+\.js$/.test(name));
@@ -51,13 +51,13 @@ async function main() {
       relatedSources = [{ name: path.basename(initial), source: asar.extractFile(args[1], initial.replace(/^[/\\]/, "")).toString() }];
     }
     origin = `${args[1]}:${entry.name}`;
-    if (source.includes(MARKER)) {
+    if (args[0] === "--asar" && source.includes(MARKER)) {
       const embedded = asar.extractFile(args[1], path.join(path.dirname(entry.name), MODULE).replace(/^[/\\]/, "")).toString();
       // Git 在 Windows 构建机可能检出 CRLF；校验源码内容后直接执行成品模块。
       assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"), "候选渲染模块与当前源码不一致");
       rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
     }
-  } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--assets PATH | --asar PATH]");
+  } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--assets PATH | --asar PATH | --source-asar PATH]");
   if (relatedSources.length && !source.includes(MARKER)) {
     const sourceAst = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     const linkedImport = unique(sourceAst.body.filter(node => node.type === "ImportDeclaration" &&
@@ -71,6 +71,15 @@ async function main() {
   assert.ok(["patched", "already-patched"].includes(result.status), result.reason);
   assert.equal(patchSource(result.source).source, result.source, "重复应用必须幂等");
   const ast = parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  if (source.includes("AmbientUsageRailMenu")) {
+    assert.ok(result.source.includes("/* CodexRebuildSidebarUsageRail */"));
+    const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
+      result.source.slice(node.start, node.end).includes("codex.profileFooter.settingsFallback")), "真实头像组件");
+    const call = unique(nodes(ast, node => node.type === "CallExpression" && node.arguments[0]?.name === footer.id.name &&
+      node.arguments[1]?.properties?.some(prop => prop.key?.name === "hideUsage")), "真实导航栏头像调用");
+    const hidden = call.arguments[1].properties.find(prop => prop.key?.name === "hideUsage").value;
+    assert.equal(hidden.value, false, "官方独立额度启用后也不能隐藏头像数字");
+  }
   const outer = unique(ast.body.filter(node => node.id?.name === COMPONENT), "账号门槛组件");
   const account = unique(ast.body.filter(node => node.id?.name === ACCOUNT_COMPONENT), "额度组件");
   const declarations = nodes(account, node => node.type === "VariableDeclarator");
@@ -132,10 +141,10 @@ async function main() {
   const ring = all(tree).find(node => node.type === "circle" && node.props.pathLength === 100);
   assert.equal(ring.props.strokeDasharray, "81 100");
   assert.equal(ring.props.strokeWidth, 2);
-  assert.match(ring.props.stroke, /^color-mix\(/);
+  assert.match(ring.props.stroke, /--color-usage-meter-fill/);
   const track = all(tree).find(node => node.type === "circle" && node.props.pathLength == null);
   assert.equal(track.props.strokeWidth, 2);
-  assert.equal(track.props.opacity, 0.1);
+  assert.match(track.props.stroke, /--color-usage-meter-track/);
   const svg = all(tree).find(node => node.type === "svg");
   assert.equal(svg.props["data-no-autosize"], true, "必须避开官方按钮 SVG 自动缩放");
   assert.equal(svg.props.style.width, tree.props.style.width);
@@ -164,9 +173,9 @@ async function main() {
   assert.equal(tree.props.style.width, 24);
   state.usage.rate_limit.secondary_window = { used_percent: 80, limit_window_seconds: 18000 };
   tree = render(); assert.equal(value(tree), "20", "多窗口取最紧张的额度");
-  assert.equal(all(tree).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, "#bd7b16");
+  assert.match(all(tree).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, /--color-usage-meter-fill/);
   state.usage = usage(90);
-  assert.equal(all(render()).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, "#dc503f");
+  assert.match(all(render()).find(node => node.type === "circle" && node.props.pathLength === 100).props.stroke, /--color-usage-meter-warning/);
   for (const [used, expected] of [[0, "100"], [100, "0"], [150, "0"], [-1, "100"], [null, "—"]]) {
     state.usage = usage(used); assert.equal(value(render()), expected);
   }
@@ -182,6 +191,23 @@ async function main() {
   assert.equal(render(), fallback); assert.equal(state.reads, 0, "API 模式不挂载官方额度订阅");
   state.auth = baseAuth; assert.equal(render(true, true), fallback); assert.equal(state.reads, 0);
   if (source === fixture) {
+    const rail = `function Rail(){const profile=jsx(Profile,{compact:true,hideUsage:enabled});const entry=enabled&&jsx(UsageMenu,{currentAccount:account,usage:usage,fallback:null,children:(data,actions)=>jsx(LazyUsage,{menu:data.menu,source:data.source,usage:usage,actions:actions})});return jsx(Layout,{leading:profile,trailing:entry})}`;
+    const patched = patchSource(fixture + rail);
+    assert.equal(patched.status, "patched", patched.reason);
+    assert.equal(patchSource(patched.source).source, patched.source);
+    const railAst = parse(patched.source, { ecmaVersion: "latest", sourceType: "module" });
+    const railFunction = railAst.body.find(node => node.id?.name === "Rail");
+    const railContext = vm.createContext({ enabled: true, account: {}, usage: {},
+      Profile: input => render(input.compact, input.hideUsage), Layout: input => input,
+      UsageMenu: () => { throw new Error("独立额度入口不应挂载"); },
+      jsx: (component, input) => component(input) });
+    vm.runInContext(patched.source.slice(railFunction.start, railFunction.end), railContext);
+    assert.equal(value(railContext.Rail().leading), "81");
+    assert.equal(railContext.Rail().trailing, null);
+    railContext.enabled = false;
+    assert.equal(value(railContext.Rail().leading), "81");
+    const drift = patchSource(fixture + rail.replace("hideUsage:enabled", "hideUsage:true"));
+    assert.equal(drift.status, "unexpected-shape");
     const invalid = fixture.replace('"/wham/usage"', '"/changed/usage"');
     assert.equal(patchSource(invalid).status, "unexpected-shape");
     assert.equal(patchSource(invalid).source, invalid);

@@ -7,6 +7,7 @@ const { applyEdits, key, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 const MODULE = "codex-rebuild-sidebar-usage.js";
 const MARKER = "/* CodexRebuildSidebarUsage */";
+const RAIL_MARKER = "/* CodexRebuildSidebarUsageRail */";
 const COMPONENT = "__CodexSidebarUsage";
 const ACCOUNT_COMPONENT = "__CodexAccountSidebarUsage";
 const RENDER = "__codexRenderSidebarUsage";
@@ -137,6 +138,40 @@ function analyze(source, ast, relatedSources = []) {
     usageAtom: usageAtom.left.name, initialize: initialize.id.name };
 }
 
+// 独立额度入口启用后，官方会隐藏头像处额度；只调整导航栏宿主。
+function patchRail(source, footerName) {
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const avatars = nodes(ast, node => node.type === "CallExpression" &&
+    node.arguments[0]?.name === footerName && node.arguments[1]?.type === "ObjectExpression" &&
+    (literal(props(node.arguments[1]).compact) === true ||
+      props(node.arguments[1]).compact?.type === "UnaryExpression" &&
+      props(node.arguments[1]).compact.operator === "!" && literal(props(node.arguments[1]).compact.argument) === 0) &&
+    props(node.arguments[1]).hideUsage);
+  if (!avatars.length && !source.includes("AmbientUsageRailMenu")) return source;
+  const avatar = unique(avatars, "导航栏紧凑头像调用");
+  const host = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
+    node.start < avatar.start && node.end > avatar.end), "导航栏头像宿主");
+  const menus = nodes(host, node => node.type === "CallExpression" &&
+    node.arguments[1]?.type === "ObjectExpression" &&
+    ["currentAccount", "usage", "fallback", "children"].every(name => props(node.arguments[1])[name]) &&
+    nodes(props(node.arguments[1]).children, child => child.type === "ObjectExpression" &&
+      ["menu", "source", "usage", "actions"].every(name => props(child)[name])).length === 1);
+  const hidden = props(avatar.arguments[1]).hideUsage;
+  if (source.includes(RAIL_MARKER)) {
+    if (source.split(RAIL_MARKER).length !== 2 || literal(hidden) !== false || menus.length) {
+      throw new Error("导航栏额度替换标记不完整");
+    }
+    return source;
+  }
+  const menu = unique(menus, "官方独立额度入口");
+  if (hidden.type !== "Identifier") throw new Error("导航栏额度隐藏条件未知");
+  return applyEdits(source, [
+    { start: host.start, end: host.start, text: `${RAIL_MARKER}\n` },
+    { start: hidden.start, end: hidden.end, text: "false" },
+    { start: menu.start, end: menu.end, text: "null" },
+  ]);
+}
+
 function patchSource(source, { relatedSources = [] } = {}) {
   if (!source.includes("codex.profileFooter.settingsFallback")) return { status: "not-applicable", source };
   try {
@@ -147,7 +182,10 @@ function patchSource(source, { relatedSources = [] } = {}) {
           !ast.body.some(node => node.type === "FunctionDeclaration" && node.id?.name === ACCOUNT_COMPONENT)) {
         throw new Error("侧栏额度补丁标记不完整");
       }
-      return { status: "already-patched", source };
+      const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
+        contains(source, node, "codex.profileFooter.settingsFallback")), "已补丁头像组件");
+      const updated = patchRail(source, footer.id.name);
+      return { status: updated === source ? "already-patched" : "patched", source: updated };
     }
     if ([COMPONENT, ACCOUNT_COMPONENT, RENDER, MODULE].some(value => source.includes(value))) {
       throw new Error("侧栏额度注入名称已占用");
@@ -157,7 +195,8 @@ function patchSource(source, { relatedSources = [] } = {}) {
     const bridges = `\n${MARKER}\nfunction ${COMPONENT}(props){const auth=${shape.authHook}();return props.hidden||auth.authMethod!==\`chatgpt\`?props.fallback:(0,${shape.jsx}.jsx)(${ACCOUNT_COMPONENT},props);}\n`
       + `function ${ACCOUNT_COMPONENT}(props){${shape.initialize}();const auth=${shape.authHook}(),usage=${shape.readHook}(${shape.usageAtom}),intl=${shape.intlHook}();return ${RENDER}({...props,auth,usage:usage.data,intl,jsx:${shape.jsx}});}\n`;
     const patched = applyEdits(source, [{ start: shape.avatarSlot.init.start, end: shape.avatarSlot.init.end, text: call }]);
-    const result = `import {renderSidebarUsage as ${RENDER}} from "./${MODULE}";\n` + patched + bridges;
+    const result = patchRail(`import {renderSidebarUsage as ${RENDER}} from "./${MODULE}";\n` + patched + bridges,
+      shape.footer.id.name);
     parse(result, { ecmaVersion: "latest", sourceType: "module" });
     return { status: "patched", source: result };
   } catch (error) {

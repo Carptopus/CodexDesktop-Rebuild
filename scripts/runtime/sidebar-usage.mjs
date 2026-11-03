@@ -12,9 +12,9 @@ export function renderSidebarUsage({ compact, auth, usage, intl, jsx }) {
     Math.max(0, Math.min(100, 100 - window.used_percent)))) : null;
   const displayValue = remaining == null ? "—" : intl.formatNumber(remaining, { maximumFractionDigits: 0 });
   const percent = remaining == null ? displayValue : `${displayValue}%`;
-  const accent = "var(--app-color-text-accent,var(--codex-base-accent,currentColor))";
-  const color = remaining == null ? "currentColor" : remaining <= 10 ? "#dc503f" : remaining <= 25 ? "#bd7b16"
-    : `color-mix(in srgb, ${accent} 75%, var(--color-text))`;
+  const color = remaining != null && remaining < 15
+    ? "var(--color-usage-meter-warning,#dc503f)"
+    : "var(--color-usage-meter-fill,var(--color-text-secondary,currentColor))";
   const details = windows.map(window => {
     const hours = window.limit_window_seconds / 3600;
     const period = hours === 168 ? (zh ? "每周" : "Weekly")
@@ -35,7 +35,8 @@ export function renderSidebarUsage({ compact, auth, usage, intl, jsx }) {
       // 官方按钮会自动缩放内部 SVG；使用其原生豁免，并把数字置于同一坐标系。
       style: { display: "block", width: size, height: size, flex: "none", margin: 0, overflow: "visible" },
       children: [jsx.jsx("circle", {
-        cx: 18, cy: 18, r: 15, fill: "none", stroke: "currentColor", strokeWidth: 2, opacity: 0.1,
+        cx: 18, cy: 18, r: 15, fill: "none",
+        stroke: "var(--color-usage-meter-track,var(--color-border-strong))", strokeWidth: 2,
       }), remaining == null ? null : jsx.jsx("circle", {
         cx: 18, cy: 18, r: 15, fill: "none", stroke: color, strokeWidth: 2,
         pathLength: 100, strokeDasharray: `${remaining} 100`, transform: "rotate(-90 18 18)",
