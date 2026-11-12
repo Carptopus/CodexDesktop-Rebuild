@@ -11,8 +11,16 @@ const {
   collectPatches: collectCopyrightPatches,
 } = require("./patch-copyright");
 const {
+  findComposerBundles,
   hasNativeWorkspaceRootPropagation,
+  hasRspackWorkspaceRootPropagation,
 } = require("./patch-composer-workspace-root");
+const { patchSource: patchI18n } = require("./patch-i18n");
+const {
+  findPluginAuthPatches,
+  findStatsigGatePatches,
+  inspectNativeGoalGate,
+} = require("./patch-plugin-auth");
 const { hasNativeArchiveDelete } = require("./patch-archive-delete");
 const {
   isElectronBootstrap,
@@ -29,6 +37,7 @@ const {
 const {
   TARGETS,
   hasNativeScopeProtection,
+  inspectNativeScopeProtection,
   patchOne: patchSentryFile,
 } = require("./patch-sentry-scope");
 const { isOwlRuntime } = require("./build-from-upstream");
@@ -50,7 +59,7 @@ test("版权补丁兼容新版 About HTML", () => {
   assert.equal(applyPatches(source, patches).includes(NEW_COPYRIGHT_HTML), true);
 });
 
-test("识别上游原生工作区根目录传递链路", () => {
+test("保留旧 ESM 工作区根目录原生链 matcher", () => {
   const primarySource = [
     "function Qut({localConversationCwd:e,selectedRemoteProjectPath:t,defaultCwd:n,workspaceRoots:r,activeWorkspaceRoot:i,codexHome:a,canUseProjectlessThreads:o}){return e||t||n||r[0]||i}",
   ].join("");
@@ -69,27 +78,162 @@ test("识别上游原生工作区根目录传递链路", () => {
   );
 });
 
+test("识别 26.1106 Rspack 工作区根目录完整传递链路", () => {
+  const primarySource = [
+    "function Qut({localConversationCwd:e,selectedRemoteProjectPath:t,defaultCwd:n,workspaceRoots:r,activeWorkspaceRoot:i,codexHome:a,canUseProjectlessThreads:o}){",
+    "if(e)return e;if(t)return t;if(n)return n;let s=r.find(e=>isRoot(e,a??void 0));return s||(i&&\"/\"!==i?i:o?fallback:\"/\")",
+    "}({localConversationCwd:pending?.cwd,selectedRemoteProjectPath:null,defaultCwd:base,workspaceRoots:roots,activeWorkspaceRoot:active,canUseProjectlessThreads:true});",
+  ].join("");
+  const sharedSource = "const query=`active-workspace-roots`;";
+
+  assert.equal(
+    hasRspackWorkspaceRootPropagation(primarySource, sharedSource),
+    true,
+  );
+  assert.equal(
+    hasRspackWorkspaceRootPropagation(
+      primarySource.replace("activeWorkspaceRoot:", "root:"),
+      sharedSource,
+    ),
+    false,
+  );
+  assert.equal(
+    hasRspackWorkspaceRootPropagation(
+      primarySource.replace("canUseProjectlessThreads:true", "projectless:true"),
+      sharedSource,
+    ),
+    false,
+  );
+});
+
+test("旧 ESM 非 Rspack composer bundle 仍扫描原生 resolver", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-workspace-legacy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assets = path.join(root, "win", "_asar", "webview", "assets");
+  fs.mkdirSync(assets, { recursive: true });
+  fs.writeFileSync(path.join(assets, "query.js"), "const key=`active-workspace-roots`;");
+  const composer = path.join(assets, "composer-old.js");
+  fs.writeFileSync(composer, [
+    "function Resolve({localConversationCwd:e,selectedRemoteProjectPath:t,defaultCwd:n,workspaceRoots:r,activeWorkspaceRoot:i,codexHome:a,canUseProjectlessThreads:o}){return e||t||n||r[0]||i}",
+  ].join(""));
+
+  const targets = findComposerBundles("win", root);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].path, composer);
+  assert.equal(targets[0].kind, "legacy-native");
+  assert.equal(targets[0].native, true);
+});
+
+test("i18n 改写保留可重入的 enable_i18n 标记", () => {
+  const source = 'const value=provider?.get("enable_i18n",!1);';
+  const result = patchI18n(source);
+
+  assert.equal(result.status, "patched");
+  assert.match(result.source, /\/\* Codex：启用界面语言 enable_i18n \*\/!0/);
+  assert.equal(patchI18n(result.source).status, "already-patched");
+  assert.equal(patchI18n('const text="enable_i18n";').status, "unrecognized-gate");
+});
+
+test("插件 query 认证、序列成员浏览器 gate 与原生 goal 链可分别识别", () => {
+  const authSource = [
+    'const query={queryFn:async()=>{if(await (0,d.s)(scope,host)!=="chatgpt")return empty;',
+    'return request("/ps/plugins/list")}};',
+  ].join("");
+  const authAst = parse(authSource, { ecmaVersion: "latest", sourceType: "module" });
+  assert.equal(findPluginAuthPatches(authAst, authSource).length, 1);
+  const callSiteOnly = 'function query(){return request("/ps/plugins/list",{label:"chatgpt"})}';
+  assert.equal(
+    findPluginAuthPatches(
+      parse(callSiteOnly, { ecmaVersion: "latest", sourceType: "module" }),
+      callSiteOnly,
+    ).length,
+    0,
+  );
+
+  const browserSource = [
+    'function availability(){let gate=(0,h.Zj)("410262010");',
+    'return{enabled:gate,featureName:"browser_use"}}',
+  ].join("");
+  const browserAst = parse(browserSource, { ecmaVersion: "latest", sourceType: "module" });
+  assert.equal(findStatsigGatePatches(browserAst, browserSource).length, 1);
+
+  const goalSource = [
+    'function rg(e,t){return"cloud"!==t&&("local"!==e.kind||"side"!==e.placement)}',
+    "function Composer(){const value=state();const t=rg(value,mode);let eO=t;let enabled=eO&&visible;",
+    'return{id:"composer.goalSlashCommand",enabled}}',
+  ].join("");
+  assert.equal(inspectNativeGoalGate(goalSource), true);
+  assert.equal(
+    inspectNativeGoalGate(goalSource.replace("enabled}}", "available}}")),
+    false,
+  );
+});
+
 test("识别上游原生归档会话删除功能", () => {
-  const source = [
-    "delete-archived-conversation",
-    "delete-all-archived-conversations",
-    "showDeleteButton",
-    "settings.dataControls.archivedChats.deleteConfirm.title",
-    "thread/delete",
-  ].join("|");
+  const dataControls = [
+    "function DataControls(manager,ui){",
+    "const [pending,setPending]=useState(null);",
+    "const run=async target=>target.kind===`all`?manager.deleteAllArchivedConversations():manager.deleteArchivedConversation(target.thread.id);",
+    "const mutationConfig={mutationKey:[`delete-archived-conversations`],mutationFn:run};",
+    "const mutation=useMutation(mutationConfig);const confirm=()=>{if(pending){setPending(null);mutation.mutate(pending)}};",
+    "return ui(Dialog,{onConfirm:confirm,children:ui(Group,{onDelete:thread=>setPending({kind:`single`,thread})})});}",
+    "function Group(input){const {onDelete:openDelete}=input;",
+    "return ui(Row,{showDeleteButton:!0,onDelete:()=>openDelete(thread)})}",
+    "function Row(input){const {showDeleteButton:show,onDelete:remove}=input;",
+    "return show?button({onClick:()=>remove()}):null}",
+  ].join("");
+  const protocol = [
+    "class Manager{deleteArchivedConversation(id){return this.runtime.deleteArchivedThreads(`local`,id)}",
+    "deleteAllArchivedConversations(){return this.runtime.deleteArchivedThreads(`local`)}}",
+    "const runtime={async deleteArchivedThreads(host,id){let service=this.threadArchive;",
+    "return id==null?await service.deleteAllArchivedThreads({hostId:host}):await service.deleteArchivedThread({hostId:host,threadId:id})}};",
+    "async function deleteOne(appServer,id){return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})}",
+    "function notification(event,manager){if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])}",
+  ].join("");
 
-  assert.equal(hasNativeArchiveDelete(source), true);
-  assert.equal(hasNativeArchiveDelete(source.replace("thread/delete", "thread/archive")), false);
-
-  const currentSource = [
-    "delete-archived-conversation",
-    "delete-archived-conversations",
-    "deleteArchivedConversation",
-    "deleteAllArchivedConversations",
-    "showDeleteButton",
-    "thread/delete",
-  ].join("|");
-  assert.equal(hasNativeArchiveDelete(currentSource), true);
+  assert.equal(hasNativeArchiveDelete(dataControls, protocol), true);
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:thread=>setPending", "onDelete:thread=>noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace("thread/delete", "thread/archive")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onConfirm:confirm", "onCancel:confirm"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:()=>openDelete(thread)", "onDelete:noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("mutation.mutate(pending)", "mutation.mutate(other);void pending"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.runtime.archiveThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.dead.deleteArchivedThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})",
+      "void `thread/delete`;return appServer.sendAppServerRequest(`thread/archive`,{threadId:id})",
+    )),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])",
+      "if(event.method===`thread/deleted`){noop()}else{manager.handleThreadDeletion([event.params.threadId])}",
+    )),
+    false,
+  );
 });
 
 test("主进程入口兼容 bootstrap 与哈希 main 文件", () => {
@@ -170,6 +314,44 @@ test("Sentry 补丁覆盖新版主进程 chunk 并保持幂等", () => {
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Sentry 初始化锚点兼容新版 transport 配置且保持幂等", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sentry-transport-"));
+  const file = path.join(directory, "worker.js");
+  try {
+    fs.writeFileSync(file, "const internal={...e,dsn:e.dsn??process.env.SENTRY_DSN,environment:e.environment??process.env.SENTRY_ENVIRONMENT,transport:e.transport??fallback};const init=client({dsn:e.dsn,transport:e=>e.buffer,environment:e.buildFlavor,release:(n=a.version,`codex@${n}`),dist:e.buildNumber??void 0,tracesSampleRate:0,integrations:e=>e});");
+    assert.equal(patchSentryFile(file, false), true);
+    const patched = fs.readFileSync(file, "utf-8");
+    assert.match(patched, /dsn:e\.dsn,maxBreadcrumbs:20,beforeBreadcrumb:/);
+    parse(patched, { ecmaVersion: "latest", sourceType: "module" });
+    assert.equal(patchSentryFile(file, false), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Sentry 原生保护接受唯一条件分支中的跨模块数据裁剪", () => {
+  const source = [
+    "var bundle={72629:function(e,t,n){const r=n(89477),o=n(25838);",
+    "try{(0,r.statSync)('scope_v3.json').size>2097152&&(0,r.unlinkSync)('scope_v3.json')}catch{}",
+    "init({dsn:v.dsn,environment:v.buildFlavor,beforeBreadcrumb:e=>quiet?null:(0,o.SKH)(e)})},",
+    "25838:function(e,t,n){n.d(t,{SKH:()=>oi});",
+    "function oi(e){let{data:t}=e;return oo(t)?e:{...e,data:{codex_truncated_breadcrumb_data:!0}}}",
+    "function oo(e){return new TextEncoder().encode(JSON.stringify(e)).byteLength<=2048}}};",
+  ].join("");
+
+  assert.deepEqual(inspectNativeScopeProtection([source]), [
+    { moduleId: 72629, sanitizerModuleId: 25838, sanitizerName: "oi" },
+  ]);
+  assert.deepEqual(
+    inspectNativeScopeProtection([source.replace("(0,o.SKH)(e)", "(0,o.unknown)(e)")]),
+    [],
+  );
+  assert.deepEqual(
+    inspectNativeScopeProtection([source.replace("byteLength<=2048", "byteLength<=9999")]),
+    [],
+  );
 });
 
 test("识别上游原生 Sentry scope 防膨胀保护", () => {

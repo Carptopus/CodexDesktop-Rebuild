@@ -1,0 +1,95 @@
+name: Promote Verified Windows Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Successful Windows Candidate run ID'
+        required: true
+        type: string
+      zip_sha256:
+        description: 'SHA-256 of the ZIP actually tested'
+        required: true
+        type: string
+      acceptance_path:
+        description: 'Reviewed public JSON acceptance record on master, e.g. release/acceptance/run-id.json'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-formal-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/master'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.14.1'
+      - name: Validate run identity and committed acceptance record
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.run_id }}
+          ACCEPTANCE_PATH: ${{ inputs.acceptance_path }}
+        run: |
+          if ($env:CANDIDATE_RUN -notmatch '^\d+$') { throw 'Invalid run ID' }
+          if ($env:ACCEPTANCE_PATH -notmatch '^release/acceptance/[A-Za-z0-9._-]+\.json$') { throw 'Acceptance must be under release/acceptance' }
+          git ls-files --error-unmatch -- $env:ACCEPTANCE_PATH
+          if ($LASTEXITCODE -ne 0) { throw 'Acceptance record is not tracked on master' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:CANDIDATE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read candidate run' }
+          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success' -or $run.path -ne '.github/workflows/windows-candidate.yml' -or $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) { throw 'Not a successful same-repository candidate run' }
+          git merge-base --is-ancestor $run.head_sha HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate source has not been merged into master' }
+          "source_commit=$($run.head_sha)" >> $env:GITHUB_OUTPUT
+          "run_attempt=$($run.run_attempt)" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          name: Windows-Candidate
+          path: artifacts/candidate
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          name: Windows-Source
+          path: artifacts/candidate
+      - name: Verify original payload and all acceptance gates
+        id: verify
+        env:
+          CANDIDATE_RUN: ${{ inputs.run_id }}
+          CANDIDATE_HASH: ${{ inputs.zip_sha256 }}
+          CANDIDATE_SOURCE: ${{ steps.run.outputs.source_commit }}
+          CANDIDATE_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
+          ACCEPTANCE_PATH: ${{ inputs.acceptance_path }}
+        run: |
+          node scripts/windows-maintenance.js verify-release --dir artifacts/candidate --acceptance $env:ACCEPTANCE_PATH --run-id $env:CANDIDATE_RUN --zip-sha256 $env:CANDIDATE_HASH --source-commit $env:CANDIDATE_SOURCE --run-attempt $env:CANDIDATE_ATTEMPT
+      - name: Publish the existing tested ZIP without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.verify.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}
+          ZIP_NAME: ${{ steps.verify.outputs.zip_name }}
+        run: |
+          $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot check existing release tags' }
+          if ($existing | Where-Object tag_name -eq $env:RELEASE_TAG) { throw 'Release already exists; overwriting is prohibited' }
+          $dir = 'artifacts/candidate'
+          $files = @("$dir/$env:ZIP_NAME", "$dir/SHA256SUMS.txt", "$dir/candidate.json", "$dir/upstream.json", "$dir/verify-report.json", "$dir/acceptance.json")
+          gh release create $env:RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_COMMIT --title $env:RELEASE_TAG --notes 'Windows x64 personal build. Published from the same accepted candidate; see provenance and acceptance records. Official runtime signature may be invalid after ASAR integrity changes.'
+          if ($LASTEXITCODE -ne 0) { throw 'Release failed' }

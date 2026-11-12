@@ -20,16 +20,16 @@ if (!TARGET_SCRIPT) {
   process.exit(1);
 }
 
-console.log(`[build] current platform ${process.platform}-${process.arch} -> npm run ${TARGET_SCRIPT}`);
+console.log(`[build] current platform ${process.platform}-${process.arch} -> pnpm run ${TARGET_SCRIPT}`);
 
-const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-const result = spawnSync(npmBin, ["run", TARGET_SCRIPT], {
+const pnpmBin = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const result = spawnSync(pnpmBin, ["run", TARGET_SCRIPT], {
   stdio: "inherit",
   shell: false,
 });
 
 if (result.error) {
-  console.error(`[x] Failed to run npm: ${result.error.message}`);
+  console.error(`[x] Failed to run pnpm: ${result.error.message}`);
   process.exit(1);
 }
 

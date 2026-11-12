@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 
 const {
+  resolveSyncDirectory,
   selectWindowsPackage,
   validateWindowsPackage,
 } = require("./sync-upstream");
@@ -15,6 +16,28 @@ const ARM64_PACKAGE = {
 const X64_PACKAGE = {
   name: "OpenAI.Codex_26.715.10079.0_x64__2p2nqsd0c76g0.msix",
 };
+
+test("同步缓存目录必须由维护入口显式提供", () => {
+  const previous = process.env.CODEX_SYNC_DIR;
+  delete process.env.CODEX_SYNC_DIR;
+  try {
+    assert.throws(() => resolveSyncDirectory(), /缺少 CODEX_SYNC_DIR/);
+  } finally {
+    if (previous == null) delete process.env.CODEX_SYNC_DIR;
+    else process.env.CODEX_SYNC_DIR = previous;
+  }
+});
+
+test("同步缓存目录解析显式环境变量", () => {
+  const previous = process.env.CODEX_SYNC_DIR;
+  process.env.CODEX_SYNC_DIR = ".cache-explicit-test";
+  try {
+    assert.equal(resolveSyncDirectory(), path.resolve(".cache-explicit-test"));
+  } finally {
+    if (previous == null) delete process.env.CODEX_SYNC_DIR;
+    else process.env.CODEX_SYNC_DIR = previous;
+  }
+});
 
 function createExtractDir(t, architecture, version = "26.715.10079.0") {
   const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-msix-test-"));

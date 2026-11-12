@@ -30,7 +30,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildFeatureBundles, relPath } = require("./patch-util");
 
 const MARKER = "__codexCdpGuard";
 
@@ -41,13 +41,7 @@ const GUARD_DEF =
   MARKER +
   "=function(m,p){try{if(m===`Page.captureScreenshot`&&p&&typeof p==`object`&&p.captureBeyondViewport===!0){var q={};for(var k in p)q[k]=p[k];q.captureBeyondViewport=!1;delete q.clip;(q.format==null||q.format===`png`)&&(q.format=`jpeg`,q.quality=60);return q}}catch(e){}return p};\n";
 
-// CDP 统一转发点（sendDebuggerCommand 内部）——main bundle 中唯一
-const ANCHOR =
-  "return await hY(e.webContents.debugger.sendCommand(t,n,i),this.cdpCommandTimeoutMs,";
-const REPLACEMENT =
-  "return await hY(e.webContents.debugger.sendCommand(t,globalThis." +
-  MARKER +
-  "(t,n),i),this.cdpCommandTimeoutMs,";
+// 保留给已有诊断调用者的旧形态识别式；实际修改使用 AST 方法上下文。
 const DYNAMIC_ANCHOR_RE =
   /return await ([A-Z_$a-z][\w$]*)\(([A-Z_$a-z][\w$]*)\.webContents\.debugger\.sendCommand\(([A-Z_$a-z][\w$]*),([A-Z_$a-z][\w$]*),([A-Z_$a-z][\w$]*)\),(this\.cdpCommandTimeoutMs|[A-Z_$a-z][\w$]*),/;
 
@@ -66,21 +60,38 @@ function parseOk(code) {
 }
 
 function patchSource(code) {
-  if (code.includes(MARKER)) {
-    return { status: "already-patched", source: code };
+  // 新版对返回结果再包装，直接定位 sendDebuggerCommand 方法内的真实调用。
+  let ast;
+  try { ast = acorn.parse(code, { ecmaVersion: "latest", sourceType: "module" }); }
+  catch { return { status: "invalid-output", source: code }; }
+  const matches = [];
+  const guarded = [];
+  function walk(node, inForwarder = false) {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "MethodDefinition") inForwarder = node.key?.name === "sendDebuggerCommand";
+    if (inForwarder && node.type === "CallExpression" && node.arguments.length === 3 &&
+        /\.webContents\.debugger\.sendCommand$/.test(code.slice(node.callee.start, node.callee.end))) {
+      if (node.arguments.every((arg) => arg.type === "Identifier")) matches.push(node);
+      else {
+        const [method, params, session] = node.arguments;
+        if (method.type === "Identifier" && session.type === "Identifier" && params.type === "CallExpression" &&
+            code.slice(params.callee.start, params.callee.end) === `globalThis.${MARKER}` &&
+            params.arguments.length === 2 && params.arguments[0].name === method.name && params.arguments[1].type === "Identifier") guarded.push(node);
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((child) => walk(child, inForwarder));
+      else if (value?.type) walk(value, inForwarder);
+    }
   }
-
+  walk(ast);
+  if (code.includes(MARKER)) return { status: code.includes(GUARD_DEF) && guarded.length === 1 && matches.length === 0 ? "already-patched" : "unexpected-shape", source: code };
+  if (matches.length > 1) return { status: "unexpected-shape", source: code };
   let forwarded = null;
-  if (code.includes(ANCHOR)) {
-    forwarded = code.replace(ANCHOR, REPLACEMENT);
-  } else {
-    forwarded = code.replace(
-      DYNAMIC_ANCHOR_RE,
-      (match, timeoutFn, webContents, method, params, sessionId, timeout) =>
-        `return await ${timeoutFn}(${webContents}.webContents.debugger.sendCommand(` +
-        `${method},globalThis.${MARKER}(${method},${params}),${sessionId}),${timeout},`,
-    );
-    if (forwarded === code) forwarded = null;
+  if (matches.length === 1) {
+    const [method, params] = matches[0].arguments;
+    const replacement = `globalThis.${MARKER}(${code.slice(method.start, method.end)},${code.slice(params.start, params.end)})`;
+    forwarded = code.slice(0, params.start) + replacement + code.slice(params.end);
   }
 
   if (forwarded == null) {
@@ -108,10 +119,10 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main-.*\.js$/,
+  const bundles = locateBuildFeatureBundles({
     platform,
+    label: "CDP screenshot",
+    match: code => code.includes("sendDebuggerCommand") && code.includes("Page.captureScreenshot") && code.includes("captureBeyondViewport"),
   });
 
   if (bundles.length === 0) {

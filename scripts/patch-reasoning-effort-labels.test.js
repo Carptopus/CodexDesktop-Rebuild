@@ -69,3 +69,19 @@ test("关键消息缺失时失败，避免静默产生不完整补丁", () => {
     },
   ]);
 });
+
+test("Rspack JSON 语言包保留其他翻译和转义，重复补丁保持幂等", () => {
+  const translations = { ...TRANSLATIONS, unrelated: "引号\"、反斜杠\\和换行\n" };
+  translations["composer.mode.local.reasoning.none.label"] = "无";
+  const source = `export const __webpack_modules__={locale(e){e.exports=JSON.parse(${JSON.stringify(JSON.stringify(translations))})}};`;
+  const result = patchSource(source);
+  assert.equal(result.status, "patched");
+  const { parse } = require("acorn");
+  const { nodes } = require("./patch-ast-util");
+  const ast = parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
+  const call = nodes(ast, node => node.type === "CallExpression" && node.callee.property?.name === "parse")[0];
+  const data = JSON.parse(call.arguments[0].value);
+  assert.equal(data.unrelated, translations.unrelated);
+  assert.equal(data["composer.mode.local.reasoning.none.label"], "无（none）");
+  assert.equal(patchSource(result.source).status, "already-patched");
+});

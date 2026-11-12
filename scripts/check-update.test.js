@@ -1,8 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const { randomUUID } = require("crypto");
 
-const { findUpdates, resolveVersionFile } = require("./check-update");
+const { findUpdates, resolveVersionFile, main } = require("./check-update");
 
 const CURRENT_PLATFORMS = [
   { platform: "macOS-arm64", version: "26.721.41059", build: "5848" },
@@ -53,4 +56,43 @@ test("缺少状态文件路径时直接失败", () => {
     () => resolveVersionFile(["--state-file", "--json"]),
     /需要提供文件路径/
   );
+});
+
+test("检测不完整时 JSON 报错、退出码为 2 且不保存部分结果", async () => {
+  const testRoot = process.env.CODEX_REBUILD_TEST_ROOT || os.tmpdir();
+  const dir = path.join(testRoot, `check-update-${randomUUID()}`);
+  const stateFile = path.join(dir, "versions.json");
+  const saved = { Windows: { version: "26.721.4979.0" } };
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(saved));
+  const output = [];
+  const previousExitCode = process.exitCode;
+  const previousLog = console.log;
+  const previousError = console.error;
+
+  try {
+    process.exitCode = 0;
+    console.log = (line) => output.push(line);
+    console.error = () => {};
+    const result = await main({
+      args: ["--json", "--save", "--state-file", stateFile],
+      checkers: [
+        async () => CURRENT_PLATFORMS[0],
+        async () => CURRENT_PLATFORMS[1],
+        async () => { throw new Error("Store unavailable"); },
+      ],
+    });
+
+    const json = JSON.parse(output[0]);
+    assert.equal(json.hasUpdates, null);
+    assert.deepEqual(json.errors, { Windows: "Store unavailable" });
+    assert.equal(result.errors.Windows, "Store unavailable");
+    assert.equal(process.exitCode, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf-8")), saved);
+  } finally {
+    process.exitCode = previousExitCode;
+    console.log = previousLog;
+    console.error = previousError;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

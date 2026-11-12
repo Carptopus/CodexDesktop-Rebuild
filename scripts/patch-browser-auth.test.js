@@ -1,7 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { patchSource } = require("./patch-browser-auth");
+const {
+  hasNativeManagedRequestHeaders,
+  patchSource,
+} = require("./patch-browser-auth");
 
 function createService(identityPromise, gateValue = true) {
   return [
@@ -98,4 +101,61 @@ test("未知上游结构会明确失败而不是静默漏补", () => {
   ].join("");
 
   assert.equal(patchSource(source).status, "unexpected-shape");
+});
+
+test("26.1013 原生托管请求头不再依赖 ChatGPT 身份 gate", () => {
+  const source = [
+    "class Preferences{async getExtensionRequestHeaders(){",
+    "return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders",
+    "}}",
+    "class BrowserTransport{constructor(readRequestHeaders){this.readRequestHeaders=readRequestHeaders}",
+    "async sendSessionRequest(){",
+    "const headers=await this.readRequestHeaders();",
+    "if(this.clientInfo.requestHeadersVersion===1)this.params.request_headers=headers;",
+    "}}",
+    "const preferences=new Preferences();",
+    "const browser=new BrowserTransport(async()=>preferences.getExtensionRequestHeaders());",
+    'async function readBrowserFeatureGate(){throw new Error("Browser feature gates require caller identity.")}',
+  ].join("");
+
+  assert.equal(hasNativeManagedRequestHeaders(source), true);
+  assert.equal(patchSource(source).status, "not-applicable");
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace("readRequirements", "readAccountIdentity")),
+    false,
+  );
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace("this.readRequestHeaders=readRequestHeaders", "this.other=readRequestHeaders")),
+    false,
+  );
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace("request_headers=headers", "request_headers=[]")),
+    false,
+  );
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace(
+      "class Preferences{",
+      "class OtherPreferences{async getExtensionRequestHeaders(){return []}}class Preferences{",
+    ).replace("new Preferences()", "new OtherPreferences()")),
+    false,
+  );
+});
+
+test("26.1013 原生托管请求头绑定宿主属性、传输回调与真实配置类", () => {
+  const source = [
+    "class Preferences{async getExtensionRequestHeaders(){",
+    "return(await this.config.readRequirements())?.requirements?.browserUse?.extension?.requestHeaders",
+    "}}",
+    "class BrowserTransport{constructor(api,readRequestHeaders){this.api=api;this.readRequestHeaders=readRequestHeaders}",
+    "async sendSessionRequest(){const headers=await this.readRequestHeaders();this.params.request_headers=headers}}",
+    "class Browsers{constructor(runtime,preferences){this.runtime=runtime;this.preferences=preferences}",
+    "refresh(){return new BrowserTransport(this.runtime,async()=>this.preferences?.getExtensionRequestHeaders())}}",
+    "new Browsers(runtime,new Preferences(config,runtime));",
+  ].join("");
+
+  assert.equal(hasNativeManagedRequestHeaders(source), true);
+  assert.equal(
+    hasNativeManagedRequestHeaders(source.replace("new Preferences(config,runtime)", "new OtherPreferences()")),
+    false,
+  );
 });

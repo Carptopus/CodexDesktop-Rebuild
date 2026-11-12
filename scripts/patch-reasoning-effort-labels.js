@@ -14,6 +14,8 @@ const path = require("path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
 
+const { frontendFiles } = require("./rspack-util");
+const { nodes } = require("./patch-ast-util");
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 
 const TRANSLATION_SPECS = Object.freeze([
@@ -75,6 +77,34 @@ function findOccurrences(source, marker) {
 }
 
 function patchSource(source) {
+  if (source.slice(0, 220).includes("exports=JSON.parse(")) {
+    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    const calls = nodes(ast, node => node.type === "CallExpression" &&
+      node.callee.type === "MemberExpression" && node.callee.object.name === "JSON" &&
+      node.callee.property.name === "parse" && node.arguments[0]?.type === "Literal");
+    if (calls.length !== 1) {
+      return { status: "unexpected-entry-count", invalidEntries: [{ messageId: "JSON locale", count: calls.length }], source };
+    }
+    const argument = calls[0].arguments[0], data = JSON.parse(argument.value);
+    const patches = [], invalidEntries = [];
+    for (const { messageIds, translation } of TRANSLATION_SPECS) {
+      const ids = messageIds.filter(id => Object.hasOwn(data, id));
+      if (ids.length !== 1) {
+        invalidEntries.push({ messageId: messageIds.join(" or "), count: ids.length });
+        continue;
+      }
+      const id = ids[0];
+      if (data[id] !== translation) {
+        patches.push({ messageId: id, original: data[id], replacement: translation });
+        data[id] = translation;
+      }
+    }
+    if (invalidEntries.length) return { status: "unexpected-entry-count", invalidEntries, source };
+    if (!patches.length) return { status: "already-patched", patches, source };
+    const nextSource = source.slice(0, argument.start) + JSON.stringify(JSON.stringify(data)) + source.slice(argument.end);
+    parse(nextSource, { ecmaVersion: "latest", sourceType: "module" });
+    return { status: "patched", patches, source: nextSource };
+  }
   const patches = [];
   const invalidEntries = [];
 
@@ -139,6 +169,15 @@ function getPlatforms(platform) {
   );
 }
 
+function findTranslationFiles(directory) {
+  return frontendFiles(directory).filter(file => {
+    if (/^zh-CN-.*\.js$/.test(path.basename(file))) return true;
+    const source = fs.readFileSync(file, "utf8");
+    return source.slice(0, 220).includes("exports=JSON.parse(") &&
+      /"composer\.mode\.local\.reasoning\.none\.label":"无(?:（none）)?"/.test(source.replaceAll('\\"', '"'));
+  });
+}
+
 function findTargets(platform) {
   const targets = [];
   const invalidPlatforms = [];
@@ -151,9 +190,7 @@ function findTargets(platform) {
       "webview",
       "assets",
     );
-    const files = fs
-      .readdirSync(assetsDir)
-      .filter((file) => /^zh-CN-.*\.js$/.test(file));
+    const files = findTranslationFiles(assetsDir);
 
     if (files.length !== 1) {
       invalidPlatforms.push({ platform: currentPlatform, count: files.length });
@@ -162,7 +199,7 @@ function findTargets(platform) {
 
     targets.push({
       platform: currentPlatform,
-      path: path.join(assetsDir, files[0]),
+      path: files[0],
     });
   }
 
@@ -236,4 +273,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { TRANSLATIONS, TRANSLATION_SPECS, findTargets, patchSource };
+module.exports = { TRANSLATIONS, TRANSLATION_SPECS, findTranslationFiles, findTargets, patchSource };

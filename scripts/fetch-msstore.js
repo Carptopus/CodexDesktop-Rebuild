@@ -386,31 +386,37 @@ async function getFileList(cookie, categoryId, ring) {
   return updates;
 }
 
-async function getDownloadUrl(updateID, revisionNumber, ring, digest) {
+async function getDownloadUrl(updateID, revisionNumber, ring, digest, options = {}) {
   const soap = makeGetUrlSoap(updateID, revisionNumber, ring);
-  const res = await soapPost(
-    "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/secured",
-    soap
-  );
+  const request = options.request || ((url, body) => httpsRequestOnce(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/soap+xml; charset=utf-8",
+      "Content-Length": Buffer.byteLength(body, "utf-8"),
+    },
+    body,
+  }));
+  // 商店灰度发布时可能 HTTP 200 但暂时没有匹配文件；重试同一更新且不放宽摘要校验。
+  return withRetry(async () => {
+    const res = await request(
+      "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/secured",
+      soap
+    );
+    if (res.status !== 200) {
+      throw new Error(`GetExtendedUpdateInfo2 失败: HTTP ${res.status}`);
+    }
 
-  if (res.status !== 200) return "";
+    const locations = deepFindAll(parseXml(res.body), "FileLocation");
+    for (const loc of locations) {
+      const fileDigest = deepFind(loc, "FileDigest");
+      const url = deepFind(loc, "Url");
+      if (digest && fileDigest === digest && typeof url === "string" && /^https?:\/\//.test(url)) {
+        return url;
+      }
+    }
 
-  const parsed = parseXml(res.body);
-  const locations = deepFindAll(parsed, "FileLocation");
-
-  for (const loc of locations) {
-    const fileDigest = deepFind(loc, "FileDigest");
-    const url = deepFind(loc, "Url");
-    if (fileDigest === digest && url) return url;
-  }
-
-  // 如果 digest 匹配不到，返回第一个 URL
-  for (const loc of locations) {
-    const url = deepFind(loc, "Url");
-    if (url && typeof url === "string" && url.startsWith("http")) return url;
-  }
-
-  return "";
+    throw new Error(`微软未返回与包摘要匹配的下载链接 (${updateID})`);
+  }, options);
 }
 
 // ─── 深度搜索辅助 ────────────────────────────────────────────────
@@ -595,9 +601,13 @@ async function main() {
 
   // Step 4: Get URLs
   console.log(`  [4/4] 获取下载链接...`);
+  const selected = filter
+    ? packages.filter((pkg) => pkg.name.toLowerCase().includes(filter))
+    : packages;
   const results = [];
 
-  for (const pkg of packages) {
+  // 先筛选目标包，避免无关架构或依赖包的链接失败阻断目标包处理。
+  for (const pkg of selected) {
     const url = await getDownloadUrl(
       pkg.updateID,
       pkg.revisionNumber,
@@ -607,11 +617,7 @@ async function main() {
     results.push({ ...pkg, url });
   }
 
-  // 过滤
-  let filtered = results;
-  if (filter) {
-    filtered = results.filter((r) => r.name.toLowerCase().includes(filter));
-  }
+  const filtered = results;
 
   // 输出结果
   console.log(`\n${"─".repeat(80)}`);

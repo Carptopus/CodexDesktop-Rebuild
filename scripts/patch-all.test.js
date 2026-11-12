@@ -44,7 +44,7 @@ test("真实 updater 补丁的预检查不修改资源，应用后关闭更新",
 
 test("可选版权补丁失败时保留上游文件，严格模式阻止继续", (t) => {
   const root = fixture(t);
-  const first = "const broken=;";
+  const first = 'const about={copyright:"© OpenAI"};const broken=;';
   const firstFile = write(root, ".vite/build/main-a.js", first);
   const reportDir = path.join(root, "report");
   const options = { platform: "win", sourceDir: root, reportDir, policy: policy("patch-copyright.js"), log: () => {} };
@@ -68,10 +68,26 @@ test("可选版权补丁失败时保留上游文件，严格模式阻止继续",
   assert.equal(updater.shouldIncludeUpdater(), false);
 });
 
+test("新版箭头 updater 门槛在真实 CLI 应用后关闭且审计通过", t => {
+  const root = fixture(t);
+  const source = 'const updater={shouldIncludeWindowsUpdater:(plan,host)=>host==="win32",shouldIncludeWindowsMsixUpdater:()=>true,shouldIncludeUpdater:()=>true};';
+  const file = write(root, ".vite/build/early-bootstrap.js", source);
+  const options = { platform: "win", sourceDir: root, policy: policy("patch-updater.js"), log: () => {} };
+  assert.equal(runPatches(options).canBuild, true);
+  const updated = fs.readFileSync(file, "utf8");
+  const updater = Function(`${updated};return updater`)();
+  assert.equal(updater.shouldIncludeWindowsUpdater("pro", "win32"), false);
+  assert.equal(updater.shouldIncludeWindowsMsixUpdater(), false);
+  assert.equal(updater.shouldIncludeUpdater(), false);
+  assert.ok(require("./patch-updater").auditUpdaterSource(updated).every(item => item.disabled));
+  assert.equal(runPatches(options).canBuild, true);
+  assert.equal(fs.readFileSync(file, "utf8"), updated);
+});
+
 test("可选补丁已写文件但报告写入失败时回滚并阻止构建", (t) => {
   const root = fixture(t);
   const source = "const about={copyright:'© OpenAI'};";
-  const file = write(root, ".vite/build/main-test.js", source);
+  const file = write(root, ".vite/build/early-bootstrap-499-test.js", source);
   const reportDir = path.join(root, "report");
   fs.mkdirSync(path.join(reportDir, "logs", "win-patch-copyright.js.log"), { recursive: true });
 
@@ -123,37 +139,33 @@ test("CLI 缺少同步资源时返回失败并生成可读报告", (t) => {
   assert.match(report.errors[0], /mac-arm64/);
 });
 
-test("报告合并正常扫描提示，并把缺少目标与平台不适用分开", (t) => {
+test("报告合并正常扫描提示，并阻止缺少必要补丁目标", (t) => {
   const root = fixture(t);
   const asar = path.join(root, "mac-arm64", "_asar");
   const assets = path.join(asar, "webview", "assets");
   fs.mkdirSync(assets, { recursive: true });
   fs.writeFileSync(path.join(asar, "package.json"), JSON.stringify({ version: "26.1007.21159" }));
-  // These chunks are scanned for auth but contain no patchable auth function.
+  // Harmless asset chunks must not turn missing required targets into success.
   for (const file of ["auth-a.js", "auth-b.js"]) {
     fs.writeFileSync(path.join(assets, file), "const authMethod='chatgpt';const allowed=authMethod!=='chatgpt';");
   }
   const reportDir = path.join(root, "report");
   const report = runPatches({
     platform: "mac-arm64", sourceDir: root, check: true, reportDir,
-    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js", "patch-plugin-auth.js"),
+    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js"),
     log: () => {},
   });
 
-  assert.equal(report.canBuild, true);
-  assert.equal(report.reviewCount, 1);
-  const scanner = report.results.find((item) => item.script === "patch-plugin-auth.js");
-  assert.equal(scanner.noticeSummary.length, 1);
-  assert.equal(scanner.noticeSummary[0].kind, "info");
-  assert.equal(scanner.noticeSummary[0].count, 2);
+  assert.equal(report.canBuild, false);
+  assert.equal(report.reviewCount, 0);
   assert.equal(report.results.find((item) => item.script === "patch-windows-portable-runtime.js").noticeSummary[0].kind, "info");
-  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").noticeSummary[0].kind, "review");
+  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").status, "failed");
 
   const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
-  // The table must not claim a missing submenu patch was applied.
+  // A required patch with no verifiable target must block the build.
   const submenuRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-model-picker-submenu.js"));
-  assert.match(submenuRow, /待核对/);
-  const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-plugin-auth.js"));
+  assert.match(submenuRow, /失败，阻止构建/);
+  const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-windows-portable-runtime.js"));
   assert.equal(infoLines.length, 1);
   assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);
 });

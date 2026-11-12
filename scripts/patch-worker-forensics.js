@@ -53,10 +53,11 @@ const fs = require("fs");
 const acorn = require("acorn");
 const { locateBundles, relPath } = require("./patch-util");
 
-const MARKER = "__CODEX_WORKER_FORENSICS_V3__";
+const MARKER = "__CODEX_WORKER_FORENSICS_V4__";
 const LEGACY_MARKERS = [
   "__CODEX_WORKER_FORENSICS__",
   "__CODEX_WORKER_FORENSICS_V2__",
+  "__CODEX_WORKER_FORENSICS_V3__",
 ];
 
 // 注入体：自包含 CJS，不依赖 electron（worker/utility 进程无 app）。
@@ -75,6 +76,22 @@ function __codexWorkerForensics() {
       dir,
       "forensics-" + new Date().toISOString().slice(0, 10) + ".log",
     );
+    var MAX_LOG_BYTES = 16 * 1024 * 1024;
+    var MAX_LOG_FILES = 7;
+    try {
+      var oldLogs = fs
+        .readdirSync(dir)
+        .filter(function (name) {
+          return /^forensics-\d{4}-\d{2}-\d{2}\.log$/.test(name);
+        })
+        .sort()
+        .reverse();
+      for (var oldIndex = MAX_LOG_FILES; oldIndex < oldLogs.length; oldIndex++) {
+        try {
+          fs.unlinkSync(path.join(dir, oldLogs[oldIndex]));
+        } catch (e) {}
+      }
+    } catch (e) {}
 
     // 标注进程角色：worker_threads 主线程 / 工作线程 / 独立进程
     var role = "worker";
@@ -85,6 +102,7 @@ function __codexWorkerForensics() {
 
     function write(line) {
       try {
+        if (fs.existsSync(logFile) && fs.statSync(logFile).size >= MAX_LOG_BYTES) return;
         fs.appendFileSync(
           logFile,
           "[" +
@@ -294,13 +312,11 @@ function __codexWorkerForensics() {
     } catch (e) {}
   } catch (e) {
     try {
-      require("node:fs").appendFileSync(
-        require("node:path").join(
-          require("node:os").tmpdir(),
-          "codex-forensics-fatal.log",
-        ),
-        "worker-forensics: " + String((e && e.stack) || e) + "\n",
-      );
+      var fatalFs = require("node:fs");
+      var fatalFile = require("node:path").join(require("node:os").tmpdir(), "codex-forensics-fatal.log");
+      if (!fatalFs.existsSync(fatalFile) || fatalFs.statSync(fatalFile).size < 1024 * 1024) {
+        fatalFs.appendFileSync(fatalFile, "worker-forensics: " + String((e && e.stack) || e) + "\n");
+      }
     } catch (e2) {}
   }
 }

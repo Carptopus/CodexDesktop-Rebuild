@@ -4,7 +4,10 @@
  *
  * 26.825 起，上游把工作区的所有打开目标统一收进“打开方式”子菜单；
  * 26.901 又把侧边栏会话菜单拆到 app-primary，并仅为 Git 会话调用该菜单；
- * 26.908 将该限制移入派生选择器；26.911 又将菜单构造器移回 app-initial。
+ * 26.908 将该限制移入派生选择器；26.911 又将菜单构造器移回 app-initial；
+ * 26.1021 将两类菜单移回 app-primary，因此按菜单内容而非固定 chunk 定位。
+ * 顶层入口复用工作区菜单回调，保留工作树解析和错误提示，避免调用要求
+ * ThreadScope 的通用文件预览函数而在全局侧边栏抛 Missing scope instance。
  * 本补丁先复用打开链路增加顶层入口，再按内容定位侧边栏菜单并放宽两种
  * 结构中的 Git 限制，使所有有工作目录的本地会话都能显示入口。旧版若已
  * 提供 open-thread-folder，则安全跳过。
@@ -14,11 +17,18 @@
  *   node scripts/patch-thread-file-manager-action.js --check
  */
 const fs = require("fs");
+const path = require("path");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const {
+  findFrontendModules,
+  isRspackFrontend,
+  replaceFrontendModule,
+} = require("./rspack-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
-const MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
+const LEGACY_MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
+const MARKER = "/* Codex：对话菜单通过工作区打开链路显示系统文件管理器入口（v2）。 */";
 const SIDEBAR_MARKER =
   "/* Codex：侧边栏会话菜单对普通目录显示打开入口。 */";
 const DIRECT_ACTION_ID = "open-workspace-file-manager-direct";
@@ -32,15 +42,8 @@ const SIDEBAR_PATCHABLE_SIGNATURES = [
   "id:`archive-thread`",
   "id:`open-in-new-window`",
 ];
-const SIDEBAR_BUNDLE_SIGNATURES = [
-  "rename-thread",
-  "archive-thread",
-  "open-in-new-window",
-  "remote_control_connections",
-];
-
 function hasSidebarMenuSignatures(source) {
-  return SIDEBAR_BUNDLE_SIGNATURES.every((signature) =>
+  return SIDEBAR_PATCHABLE_SIGNATURES.every((signature) =>
     source.includes(signature),
   );
 }
@@ -174,7 +177,6 @@ function parse(source) {
 
 function findPatchContext(ast, source) {
   const menuBuilders = [];
-  const openHelpers = [];
 
   walk(ast, (node) => {
     if (node.type !== "FunctionDeclaration" || node.id?.type !== "Identifier") {
@@ -185,15 +187,7 @@ function findPatchContext(ast, source) {
     const mayBuildMenu = ["scope", "cwd", "hostId"].every((key) =>
       bindings.has(key),
     );
-    const mayOpenItem = [
-      "scope",
-      "cwd",
-      "hostId",
-      "path",
-      "target",
-      "openMode",
-    ].every((key) => bindings.has(key));
-    if (!mayBuildMenu && !mayOpenItem) return;
+    if (!mayBuildMenu) return;
     const code = source.slice(node.start, node.end);
 
     if (
@@ -233,21 +227,121 @@ function findPatchContext(ast, source) {
       menuBuilders.push({ bindings, returns, targetsVariables });
     }
 
-    if (
-      mayOpenItem &&
-      code.includes("persistPreferredTargetPath") &&
-      code.includes("openInSidePanel")
-    ) {
-      openHelpers.push(node.id.name);
-    }
   });
 
-  return { menuBuilders, openHelpers };
+  return { menuBuilders };
 }
 
-function findSidebarPatchContexts(ast, source) {
+function workspaceOpenCallback(call, source, scope) {
+  const callback = objectExpressionProperties(call.arguments[0]).get("onOpenInTarget");
+  if (!callback || !["ArrowFunctionExpression", "FunctionExpression"].includes(callback.type)) {
+    return null;
+  }
+  const edits = [];
+  let openMutations = 0;
+  walk(callback, (node) => {
+    if (node.type === "Property" && propertyName(node) === "persistPreferredTargetPath") {
+      // 顶层单次打开不能改写原生子菜单保存的默认编辑器或终端。
+      edits.push({ start: node.value.start, end: node.value.end, text: "void 0" });
+    }
+    if (node.type !== "CallExpression") return;
+    const properties = objectExpressionProperties(node.arguments[0]);
+    if (["mutate", "mutateAsync"].includes(memberName(node.callee)) &&
+        ["path", "cwd", "hostId", "target", "openMode"].every((key) => properties.has(key))) {
+      openMutations++;
+    }
+    const owner = node.callee?.object;
+    if (memberName(node.callee) === "setData" && memberName(owner) === "query" &&
+        owner.object?.name === scope && source.slice(node.start, node.end).includes("preferredTarget")) {
+      edits.push({ start: node.start, end: node.end, text: "void 0" });
+    }
+  });
+  if (openMutations !== 1) return null;
+  let code = source.slice(callback.start, callback.end);
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    code = code.slice(0, edit.start - callback.start) + edit.text + code.slice(edit.end - callback.start);
+  }
+  return code;
+}
+
+function restoreLegacyMenu(ast, source) {
+  const contexts = [];
+  walk(ast, (node) => {
+    if (node.type !== "FunctionDeclaration") return;
+    const statements = node.body.body;
+    const start = statements.findIndex((statement) => statement.type === "VariableDeclaration" &&
+      statement.declarations.length === 1 &&
+      statement.declarations[0].id?.name === "__codexOpenWorkspaceItems" &&
+      statement.declarations[0].init?.type === "CallExpression");
+    const end = statements.findIndex((statement) => statement.type === "ReturnStatement" &&
+      statement.argument?.type === "ArrayExpression" &&
+      source.slice(statement.start, statement.end).includes(LEGACY_MARKER));
+    if (start < 0 || end <= start) return;
+    // 只剥离旧补丁生成的语句，遇到夹杂的新逻辑不能整段删除。
+    if (!statements.slice(start + 1, end).every((statement) =>
+      statement.type === "VariableDeclaration" && statement.declarations.length === 1 &&
+      ["__codexFileManagerTarget", "__codexDesktopPlatform"].includes(statement.declarations[0].id?.name))) return;
+    contexts.push({ declaration: statements[start], returnNode: statements[end] });
+  });
+  if (contexts.length !== 1) return null;
+  const { declaration, returnNode } = contexts[0];
+  const original = declaration.declarations[0].init;
+  return source.slice(0, declaration.start) + `return ${source.slice(original.start, original.end)};` +
+    source.slice(returnNode.end);
+}
+
+function findSidebarPatchContexts(ast, source, relatedSources = []) {
   const selectorGitGates = new Map();
   const contexts = [];
+  const remoteControlAtoms = new Set();
+  const remoteControlExports = new Map();
+
+  // 26.1016 将远程连接读取封装成派生 atom，确认读取 .remoteControl 的真实定义。
+  const collectRemoteControlAtoms = (moduleAst) => {
+    const atoms = new Set();
+    walk(moduleAst, (node) => {
+    const name = node.type === "AssignmentExpression" && node.left?.type === "Identifier"
+      ? node.left.name : node.type === "VariableDeclarator" && node.id?.type === "Identifier"
+        ? node.id.name : null;
+    const call = node.type === "AssignmentExpression" ? node.right : node.init;
+    if (name == null || call?.type !== "CallExpression") return;
+    const selector = call.arguments[1];
+    const get = objectPatternBindings(selector?.params?.[0]).get("get");
+    const body = selector?.body?.type === "ChainExpression" ? selector.body.expression : selector?.body;
+    if (get != null && memberName(body) === "remoteControl" &&
+        body.object?.type === "CallExpression" && body.object.callee?.name === get &&
+        body.object.arguments.length === 1 && body.object.arguments[0].type === "Identifier") {
+      atoms.add(name);
+    }
+    });
+    return atoms;
+  };
+  for (const atom of collectRemoteControlAtoms(ast)) remoteControlAtoms.add(atom);
+
+  // app-primary 可能从 app-initial 导入 remoteControl 派生 atom；只按实际 ESM 导出/导入链解析。
+  for (const related of relatedSources) {
+    if (!related?.source || !related.path) continue;
+    let relatedAst;
+    try { relatedAst = parse(related.source); }
+    catch { continue; }
+    const atoms = collectRemoteControlAtoms(relatedAst);
+    const exported = new Set();
+    for (const statement of relatedAst.body) {
+      if (statement.type !== "ExportNamedDeclaration" || statement.source != null) continue;
+      for (const specifier of statement.specifiers) {
+        if (atoms.has(specifier.local?.name)) exported.add(specifier.exported?.name);
+      }
+    }
+    if (exported.size > 0) remoteControlExports.set(path.basename(related.path), exported);
+  }
+  walk(ast, (node) => {
+    if (node.type !== "ImportDeclaration") return;
+    const exported = remoteControlExports.get(path.basename(node.source.value));
+    if (!exported) return;
+    for (const specifier of node.specifiers) {
+      if (exported.has(specifier.imported?.name)) remoteControlAtoms.add(specifier.local.name);
+    }
+  });
 
   // 26.908 起，Git 仓库限制位于派生选择器中，而不是菜单 push 表达式中。
   walkWithAncestors(ast, (node, ancestors) => {
@@ -278,11 +372,28 @@ function findSidebarPatchContexts(ast, source) {
     if (
       conversationId == null ||
       hostId == null ||
-      get == null ||
-      !code.includes("remote_control_connections")
+      get == null
     ) {
       return;
     }
+
+    let derivedRemoteExclusion = false;
+    walk(node.body, (candidate) => {
+      if (candidate.type !== "UnaryExpression" || candidate.operator !== "!") return;
+      const some = candidate.argument?.type === "ChainExpression"
+        ? candidate.argument.expression : candidate.argument;
+      const read = some?.callee?.object;
+      const predicate = some?.arguments?.[0];
+      if (some?.type === "CallExpression" && memberName(some.callee) === "some" &&
+          read?.type === "CallExpression" && read.callee?.name === get &&
+          read.arguments.length === 1 && remoteControlAtoms.has(read.arguments[0]?.name) &&
+          predicate?.type === "ArrowFunctionExpression" && predicate.params[0]?.type === "Identifier" &&
+          predicate.body?.type === "BinaryExpression" && predicate.body.operator === "===" &&
+          memberName(predicate.body.left) === "hostId" &&
+          predicate.body.left.object?.name === predicate.params[0].name &&
+          predicate.body.right?.name === hostId) derivedRemoteExclusion = true;
+    });
+    if (!code.includes("remote_control_connections") && !derivedRemoteExclusion) return;
 
     const gitGates = [];
     walk(node.body, (candidate) => {
@@ -457,7 +568,14 @@ function patchSource(source) {
     return { status: "parse-failed", phase: "before", error, source };
   }
 
-  const { menuBuilders, openHelpers } = findPatchContext(ast, source);
+  if (source.includes(LEGACY_MARKER)) {
+    const restored = restoreLegacyMenu(ast, source);
+    if (restored == null) return { status: "unexpected-legacy-menu", source };
+    const result = patchSource(restored);
+    return result.status === "patched" ? result : { ...result, source };
+  }
+
+  const { menuBuilders } = findPatchContext(ast, source);
   if (menuBuilders.length === 0 && hasNativeAction) {
     return { status: "native", source };
   }
@@ -468,14 +586,6 @@ function patchSource(source) {
       source,
     };
   }
-  if (openHelpers.length !== 1) {
-    return {
-      status: "unexpected-open-helper-count",
-      count: openHelpers.length,
-      source,
-    };
-  }
-
   const [{ bindings, returns, targetsVariables }] = menuBuilders;
   if (returns.length !== 1) {
     return {
@@ -487,8 +597,8 @@ function patchSource(source) {
 
   const [returnNode] = returns;
   const scope = bindings.get("scope");
-  const cwd = bindings.get("cwd");
-  const hostId = bindings.get("hostId");
+  const callback = workspaceOpenCallback(returnNode.argument, source, scope);
+  if (callback == null) return { status: "missing-workspace-open-callback", source };
   const originalItems = source.slice(
     returnNode.argument.start,
     returnNode.argument.end,
@@ -496,8 +606,10 @@ function patchSource(source) {
   const itemsVariable = "__codexOpenWorkspaceItems";
   const targetVariable = "__codexFileManagerTarget";
   const platformVariable = "__codexDesktopPlatform";
+  const callbackVariable = "__codexOpenWorkspaceInTarget";
   const replacement = [
     `let ${itemsVariable}=${originalItems};`,
+    `let ${callbackVariable}=${callback};`,
     ...(targetsVariables.length === 1
       ? [
           `let ${targetVariable}=${targetsVariables[0]}?.targets.find(` +
@@ -516,10 +628,7 @@ function patchSource(source) {
         ? `${targetVariable}?.resolvedIcon??${targetVariable}?.icon??`
         : ""
     }${itemsVariable}[0]?.icon,`,
-    `onSelect:()=>${openHelpers[0]}({`,
-    `scope:${scope},path:${cwd},cwd:${cwd},hostId:${hostId},`,
-    "target:`fileManager`,openMode:`workspace`",
-    "})},",
+    `onSelect:()=>${callbackVariable}(\`fileManager\`)},`,
     `...${itemsVariable}]`,
   ].join("");
   const next =
@@ -536,7 +645,7 @@ function patchSource(source) {
   return { status: "patched", source: next };
 }
 
-function patchSidebarSource(source) {
+function patchSidebarSource(source, relatedSources = []) {
   if (source.includes(SIDEBAR_MARKER)) {
     return { status: "already-patched", source };
   }
@@ -551,7 +660,7 @@ function patchSidebarSource(source) {
     return { status: "parse-failed", phase: "before", error, source };
   }
 
-  const contexts = findSidebarPatchContexts(ast, source);
+  const contexts = findSidebarPatchContexts(ast, source, relatedSources);
   if (contexts.length !== 1) {
     return {
       status: "unexpected-sidebar-menu-gate-count",
@@ -587,38 +696,234 @@ function patchSidebarSource(source) {
   return { status: "patched", source: next };
 }
 
+function patchRspackModuleSource(module) {
+  const source = module.source;
+  if (source.includes(MARKER)) {
+    return { status: "already-patched", source };
+  }
+  let ast;
+  try {
+    ast = acorn.parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+    });
+  } catch (error) {
+    return { status: "parse-failed", phase: "before", error, source };
+  }
+
+  const builders = [];
+  walk(ast, (node) => {
+    if (!["FunctionExpression", "ArrowFunctionExpression"].includes(node.type) ||
+        node.params[0]?.type !== "ObjectPattern" ||
+        !["targets", "onOpenInTarget"].every((name) =>
+          node.params[0].properties.some((property) =>
+            property.type === "Property" && propertyName(property) === name))) {
+      return;
+    }
+    const returns = node.body?.body?.filter((statement) =>
+      statement.type === "ReturnStatement" &&
+      statement.argument?.type === "ArrayExpression" &&
+      source.slice(statement.argument.start, statement.argument.end)
+        .includes("id:\"open-workspace-in\"")) ?? [];
+    if (returns.length > 0) builders.push({ node, returnNode: returns.at(-1) });
+  });
+  if (builders.length !== 1) {
+    return { status: "unexpected-menu-builder-count", count: builders.length, source };
+  }
+
+  const [{ node: builder, returnNode }] = builders;
+  const bindings = objectPatternBindings(builder.params[0]);
+  const targets = bindings.get("targets");
+  const openTarget = bindings.get("onOpenInTarget");
+  if (targets == null || openTarget == null) {
+    return { status: "missing-rspack-menu-bindings", source };
+  }
+
+  const callbacks = [];
+  walk(ast, (node) => {
+    if (node.type !== "Property" || propertyName(node) !== "onOpenInTarget" ||
+        !["ArrowFunctionExpression", "FunctionExpression"].includes(node.value?.type)) {
+      return;
+    }
+    if (source.slice(node.value.start, node.value.end)
+      .includes("persistPreferredTargetPath")) {
+      callbacks.push(node.value);
+    }
+  });
+  if (callbacks.length !== 1) {
+    return { status: "missing-workspace-open-callback", count: callbacks.length, source };
+  }
+  const [callback] = callbacks;
+  const setDataCalls = [];
+  const persistProperties = [];
+  walk(callback, (node) => {
+    if (node.type === "CallExpression" && memberName(node.callee) === "setData" &&
+        source.slice(node.start, node.end).includes("preferredTarget")) {
+      setDataCalls.push(node);
+    }
+    if (node.type === "Property" && propertyName(node) === "persistPreferredTargetPath") {
+      persistProperties.push(node);
+    }
+  });
+  if (setDataCalls.length !== 1 || persistProperties.length !== 1) {
+    return {
+      status: "unexpected-workspace-open-callback",
+      count: setDataCalls.length,
+      source,
+    };
+  }
+
+  const persist = "__crPersistPreferredTarget";
+  const items = "__crOpenWorkspaceItems";
+  const target = "__crFileManagerTarget";
+  const platform = "__crDesktopPlatform";
+  const setData = setDataCalls[0];
+  const persistProperty = persistProperties[0];
+  const originalItems = source.slice(returnNode.argument.start, returnNode.argument.end);
+  const replacement = [
+    `let ${target}=${targets}?.find(e=>e.target===\`fileManager\`);`,
+    `let ${items}=${originalItems};`,
+    `let ${platform}=(globalThis.navigator?.userAgentData?.platform??` +
+      `globalThis.navigator?.platform??\`\`).toLowerCase();`,
+    "return[",
+    `{${MARKER}`,
+    `id:\`${DIRECT_ACTION_ID}\`,`,
+    `message:${fileManagerMessageExpression(platform)},`,
+    `icon:${target}?.resolvedIcon??${target}?.icon??${items}[0]?.icon,`,
+    `onSelect:()=>${openTarget}(\`fileManager\`,void 0,void 0,!1)},`,
+    `...${items}]`,
+  ].join("");
+  const edits = [
+    {
+      start: callback.params.at(-1).end,
+      replacement: `,${persist}=!0`,
+    },
+    {
+      start: setData.start,
+      end: setData.end,
+      replacement: `${persist}&&(${source.slice(setData.start, setData.end)})`,
+    },
+    {
+      start: persistProperty.value.start,
+      end: persistProperty.value.end,
+      replacement: `${persist}?${source.slice(
+        persistProperty.value.start,
+        persistProperty.value.end,
+      )}:void 0`,
+    },
+    {
+      start: returnNode.start,
+      end: returnNode.end,
+      replacement,
+    },
+  ].sort((left, right) => right.start - left.start);
+  let next = source;
+  for (const edit of edits) {
+    next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end ?? edit.start);
+  }
+  try {
+    acorn.parse(next, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+    });
+  } catch (error) {
+    return { status: "parse-failed", phase: "after", error, source };
+  }
+  return { status: "patched", source: next };
+}
+
+function selectTargets(bundles) {
+  const platforms = [...new Set(bundles.map((bundle) => bundle.platform))];
+  return platforms.flatMap((platform) => {
+    const candidates = bundles.filter((bundle) => bundle.platform === platform);
+    const patchable = candidates.filter(({ source }) =>
+      source.includes(MARKER) || source.includes(LEGACY_MARKER) ||
+      PATCHABLE_SIGNATURES.every((signature) => source.includes(signature)),
+    );
+    const native = candidates.filter(({ source }) => hasNativeDirectAction(source));
+    // 无法识别时仍进入核心检查，不能把 chunk 迁移误报为无需修补。
+    const openMenus = patchable.length > 0 ? patchable
+      : native.length > 0 ? native : candidates.slice(0, 1);
+    const sidebars = candidates.filter(({ source }) =>
+      source.includes(SIDEBAR_MARKER) || hasSidebarMenuSignatures(source),
+    );
+    return [
+      ...openMenus.map((target) => ({ ...target, patchKind: "open-menu" })),
+      ...sidebars.map((target) => ({ ...target, patchKind: "sidebar" })),
+    ];
+  });
+}
+
 function findTargets(platform) {
-  const appInitialTargets = locateBundles({
-    dir: "assets",
-    pattern: /^app-initial-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  })
-    .map((target) => ({
-      ...target,
-      source: fs.readFileSync(target.path, "utf-8"),
-    }));
-  const appPrimaryTargets = locateBundles({
-    dir: "assets",
-    pattern: /^app-primary-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  })
-    .map((target) => ({
-      ...target,
-      source: fs.readFileSync(target.path, "utf-8"),
-    }));
+  const requested = platform ? [platform] : PLATFORMS.filter((item) =>
+    fs.existsSync(path.join(SRC_DIR, item, "_asar", "webview", "assets")));
+  const rspackTargets = [];
+  const legacyPlatforms = [];
+  for (const current of requested) {
+    const assets = path.join(SRC_DIR, current, "_asar", "webview", "assets");
+    if (!isRspackFrontend(assets)) {
+      legacyPlatforms.push(current);
+      continue;
+    }
+    const candidates = findFrontendModules(assets, {
+      all: [
+        "localConversation.openTarget.error",
+        "persistPreferredTargetPath",
+        "onOpenInTarget",
+        "open-workspace-in",
+      ],
+    });
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    if (candidates.length === 0 || ids.size !== 1) {
+      throw new Error(
+        `[${current}] expected one Rspack workspace menu implementation, found ` +
+        `${candidates.length} module(s), ${ids.size} id(s)`,
+      );
+    }
+    rspackTargets.push(...candidates.map((candidate) => ({
+      platform: current,
+      rspack: true,
+      patchKind: "open-menu",
+      ...candidate,
+    })));
+  }
 
-  const openMenuTargets = appInitialTargets.map((target) => ({
+  const appInitialTargets = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-initial-.*\.js$/,
+      })
+        .filter((target) => legacyPlatforms.includes(target.platform))
+        .map((target) => ({
+          ...target,
+          source: fs.readFileSync(target.path, "utf-8"),
+        }))
+    : [];
+  const appPrimaryTargets = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-primary-.*\.js$/,
+      })
+        .filter((target) => legacyPlatforms.includes(target.platform))
+        .map((target) => ({
+          ...target,
+          source: fs.readFileSync(target.path, "utf-8"),
+        }))
+    : [];
+
+  const bundles = [...appInitialTargets, ...appPrimaryTargets];
+  const targets = [
+    ...rspackTargets,
+    ...selectTargets(bundles).map((target) => ({
     ...target,
-    patchKind: "open-menu",
-  }));
-  const sidebarTargets = [...appInitialTargets, ...appPrimaryTargets]
-    .filter(
-      ({ source }) =>
-        source.includes(SIDEBAR_MARKER) || hasSidebarMenuSignatures(source),
-    )
-    .map((target) => ({ ...target, patchKind: "sidebar" }));
-
-  return [...openMenuTargets, ...sidebarTargets];
+    relatedSources: bundles.filter((bundle) =>
+      bundle.platform === target.platform && bundle.path !== target.path,
+    ),
+    })),
+  ];
+  return targets;
 }
 
 function main() {
@@ -628,19 +933,33 @@ function main() {
   const targets = findTargets(platform);
 
   if (targets.length === 0) {
-    console.log("  [skip] No matching thread action bundle found");
+    console.error("  [x] No matching thread action bundle found");
+    process.exitCode = 1;
     return;
+  }
+
+  for (const current of new Set(targets.map(target => target.platform))) {
+    for (const kind of ["open-menu", "sidebar"]) {
+      const matches = targets.filter(target => target.platform === current && target.patchKind === kind);
+      if (matches.length > 1 && !matches.every(target => target.rspack)) {
+        console.error(`  [x] ${current}: ambiguous ${kind} bundles (${matches.length})`);
+        process.exitCode = 1;
+        return;
+      }
+    }
   }
 
   let patched = 0;
   let failed = 0;
   for (const target of targets) {
-    const label = relPath(target.path);
+    const label = relPath(target.rspack ? target.file : target.path);
     // 新版的两个补丁可能落在同一 bundle，必须读取上一阶段写入后的内容。
-    const source = fs.readFileSync(target.path, "utf-8");
+    const source = fs.readFileSync(target.rspack ? target.file : target.path, "utf-8");
     const result =
-      target.patchKind === "sidebar"
-        ? patchSidebarSource(source)
+      target.rspack
+        ? patchRspackModuleSource(target)
+        : target.patchKind === "sidebar"
+        ? patchSidebarSource(source, target.relatedSources)
         : patchSource(source);
 
     if (result.status === "native") {
@@ -659,7 +978,11 @@ function main() {
           `  [?] ${label}: would expose the file manager action (${target.patchKind})`,
         );
       } else {
-        fs.writeFileSync(target.path, result.source, "utf-8");
+        fs.writeFileSync(
+          target.rspack ? target.file : target.path,
+          target.rspack ? replaceFrontendModule(target, result.source) : result.source,
+          "utf-8",
+        );
         console.log(
           `  [ok] ${label}: file manager action exposed (${target.patchKind})`,
         );
@@ -686,11 +1009,14 @@ if (require.main === module) main();
 
 module.exports = {
   DIRECT_ACTION_ID,
+  LEGACY_MARKER,
   MARKER,
   SIDEBAR_MARKER,
   findTargets,
   hasSidebarMenuSignatures,
   hasNativeDirectAction,
+  patchRspackModuleSource,
   patchSidebarSource,
   patchSource,
+  selectTargets,
 };

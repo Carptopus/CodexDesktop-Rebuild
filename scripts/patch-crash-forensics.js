@@ -31,8 +31,9 @@ const { SRC_DIR, relPath } = require("./patch-util");
 const LEGACY_MARKERS = [
   "__CODEX_CRASH_FORENSICS__",
   "__CODEX_CRASH_FORENSICS_V2__",
+  "__CODEX_CRASH_FORENSICS_V3__",
 ];
-const MARKER = "__CODEX_CRASH_FORENSICS_V3__";
+const MARKER = "__CODEX_CRASH_FORENSICS_V4__";
 
 // ──────────────────────────────────────────────
 //  注入体：以真实函数形式书写，保证语法正确。
@@ -61,9 +62,31 @@ function __codexForensics() {
       "forensics-" + new Date().toISOString().slice(0, 10) + ".log",
     );
     var chromeLog = path.join(earlyDir, "chrome-debug.log");
+    var MAX_LOG_BYTES = 16 * 1024 * 1024;
+    var MAX_LOG_FILES = 7;
+
+    // 取证是辅助数据：只保留最近 7 天，每个日志最多 16MB。
+    try {
+      var oldLogs = fs
+        .readdirSync(earlyDir)
+        .filter(function (name) {
+          return /^forensics-\d{4}-\d{2}-\d{2}\.log$/.test(name);
+        })
+        .sort()
+        .reverse();
+      for (var oldIndex = MAX_LOG_FILES; oldIndex < oldLogs.length; oldIndex++) {
+        try {
+          fs.unlinkSync(path.join(earlyDir, oldLogs[oldIndex]));
+        } catch (e) {}
+      }
+      if (fs.existsSync(chromeLog) && fs.statSync(chromeLog).size >= MAX_LOG_BYTES) {
+        fs.writeFileSync(chromeLog, "");
+      }
+    } catch (e) {}
 
     function write(line) {
       try {
+        if (fs.existsSync(logFile) && fs.statSync(logFile).size >= MAX_LOG_BYTES) return;
         fs.appendFileSync(
           logFile,
           "[" + new Date().toISOString() + "] " + line + "\n",
@@ -462,13 +485,11 @@ function __codexForensics() {
   } catch (err) {
     // 取证代码自身绝不能拖垮应用
     try {
-      require("node:fs").appendFileSync(
-        require("node:path").join(
-          require("node:os").tmpdir(),
-          "codex-forensics-fatal.log",
-        ),
-        String((err && err.stack) || err) + "\n",
-      );
+      var fatalFs = require("node:fs");
+      var fatalFile = require("node:path").join(require("node:os").tmpdir(), "codex-forensics-fatal.log");
+      if (!fatalFs.existsSync(fatalFile) || fatalFs.statSync(fatalFile).size < 1024 * 1024) {
+        fatalFs.appendFileSync(fatalFile, String((err && err.stack) || err) + "\n");
+      }
     } catch (e) {}
   }
 }
@@ -517,6 +538,20 @@ function stripKnownInjections(code) {
   }
 
   return { code: next, stripped };
+}
+
+// 隔离环境必须先于 Electron 初始化；诊断代码不能抢到环境加载器之前。
+function splitStartupPrefix(code) {
+  const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "script", allowHashBang: true });
+  let offset = code.startsWith("#!") ? code.indexOf("\n") + 1 : 0;
+  for (const node of ast.body) {
+    if (node.directive) { offset = node.end; continue; }
+    if (node.type === "ExpressionStatement" && node.expression.type === "CallExpression" &&
+        node.expression.callee.name === "require" && node.expression.arguments.length === 1 &&
+        node.expression.arguments[0].value === "./codex-rebuild-test-environment.cjs") offset = node.end;
+    break;
+  }
+  return { prefix: code.slice(0, offset), code: code.slice(offset).trimStart() };
 }
 
 function isElectronBootstrap(code) {
@@ -640,15 +675,17 @@ function main() {
   for (const bundle of bundles) {
     const code = fs.readFileSync(bundle.path, "utf-8");
 
-    if (code.includes(MARKER)) {
-      const afterCurrent = stripLeadingForensicsInjection(code).code;
-      if (!startsWithForensicsInjection(afterCurrent)) {
-        console.log(`  [ok] ${relPath(bundle.path)}: already patched`);
-        continue;
-      }
+    const leading = splitStartupPrefix(code);
+    const strippedResult = stripKnownInjections(leading.code);
+    // 旧组合把诊断放在环境前；移除已知诊断后再提取环境入口，原生代码不变。
+    const remaining = splitStartupPrefix(strippedResult.code);
+    const prefix = leading.prefix + remaining.prefix;
+    const baseCode = remaining.code, stripped = strippedResult.stripped;
+    if ([MARKER, ...LEGACY_MARKERS].some(marker => baseCode.includes(marker))) {
+      console.log(`  [x] ${relPath(bundle.path)}: unexpected nested forensics injection`);
+      failed++;
+      continue;
     }
-
-    const { code: baseCode, stripped } = stripKnownInjections(code);
     if (!bundle.declared && !isElectronBootstrap(baseCode)) {
       console.log(
         `  [x] ${relPath(bundle.path)}: not an Electron main entry, skipping`,
@@ -657,7 +694,11 @@ function main() {
       continue;
     }
 
-    const next = INJECT + baseCode;
+    const next = (prefix ? prefix + "\n" : "") + INJECT + baseCode;
+    if (next === code) {
+      console.log(`  [ok] ${relPath(bundle.path)}: already patched`);
+      continue;
+    }
 
     // 写入前对最终结果做语法校验，解析失败则中止不写
     try {

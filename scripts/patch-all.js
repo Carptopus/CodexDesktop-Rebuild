@@ -45,11 +45,11 @@ function snapshotOptionalTargets(patch, sourceDir, platform) {
     ? path.join(sourceDir, platform, "_asar", "webview", "assets")
     : path.join(sourceDir, platform, "_asar", ".vite", "build");
   if (!fs.existsSync(directory)) return [];
-  const pattern = patch.rollback === "translations" ? /^zh-CN-.*\.js$/ : /^main(?:-[^.]+)?\.js$/;
-  return fs.readdirSync(directory).filter((name) => pattern.test(name)).map((name) => {
-    const file = path.join(directory, name);
-    return { file, contents: fs.readFileSync(file) };
-  });
+  const files = patch.rollback === "translations"
+    ? require("./patch-reasoning-effort-labels").findTranslationFiles(directory)
+    : fs.readdirSync(directory).filter(name => /^(?:main|early-bootstrap)(?:-[^.]+)?\.js$/.test(name))
+      .map(name => path.join(directory, name));
+  return files.map(file => ({ file, contents: fs.readFileSync(file) }));
 }
 
 function restoreFiles(snapshot) {
