@@ -12,6 +12,7 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
 const { relPath, SRC_DIR } = require("./patch-util");
+const { frontendFiles, rspackModules } = require("./rspack-util");
 
 const PLATFORM_NAMES = ["mac-arm64", "mac-x64", "win"];
 
@@ -203,11 +204,11 @@ function patchSource(source) {
   return { status: "patched", source: patchedSource, patches };
 }
 
-function findTargets(platforms) {
+function findTargets(platforms, sourceDir = SRC_DIR) {
   const targets = [];
   for (const platform of platforms) {
     const assetsDir = path.join(
-      SRC_DIR,
+      sourceDir,
       platform,
       "_asar",
       "webview",
@@ -215,21 +216,74 @@ function findTargets(platforms) {
     );
     if (!fs.existsSync(assetsDir)) continue;
 
-    for (const file of fs.readdirSync(assetsDir)) {
-      if (!file.endsWith(".js")) continue;
-      const filePath = path.join(assetsDir, file);
+    for (const filePath of frontendFiles(assetsDir)) {
       const source = fs.readFileSync(filePath, "utf8");
-      if (
-        source.includes("unsupported-auth") &&
-        source.includes("chatgpt") &&
-        (source.includes("freeAndGoPlansAllowed") ||
-          source.includes("freePlanAllowed"))
-      ) {
-        targets.push({ platform, path: filePath });
+      if (source.includes("export const __webpack_modules__=")
+        && !source.slice(0, 220).includes("exports=JSON.parse(")
+        && source.includes("unsupported-auth")
+        && (source.includes("freeAndGoPlansAllowed")
+          || source.includes("freePlanAllowed"))) {
+        for (const module of rspackModules(source)) {
+          if (!hasVoiceFunctionMarkers(module.source)) continue;
+          targets.push({
+            platform,
+            path: filePath,
+            source: module.source,
+            chunkSource: source,
+            kind: "rspack",
+            moduleId: module.id,
+            start: module.start,
+            end: module.end,
+          });
+        }
+      } else if (hasVoiceFunctionMarkers(source) && source.includes("chatgpt")) {
+        targets.push({
+          platform,
+          path: filePath,
+          source,
+          kind: "legacy",
+          start: 0,
+          end: source.length,
+        });
       }
     }
   }
   return targets;
+}
+
+function writePatchedTargets(results, check) {
+  const byFile = new Map();
+  for (const { target, result } of results) {
+    if (target.kind !== "rspack") continue;
+    const group = byFile.get(target.path) || {
+      target,
+      replacements: [],
+    };
+    group.replacements.push({
+      start: target.start,
+      end: target.end,
+      replacement: result.source,
+    });
+    byFile.set(target.path, group);
+  }
+
+  for (const group of byFile.values()) {
+    let next = group.target.chunkSource;
+    for (const replacement of group.replacements
+      .sort((left, right) => right.start - left.start)) {
+      next = next.slice(0, replacement.start)
+        + replacement.replacement
+        + next.slice(replacement.end);
+    }
+    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+    if (!check) fs.writeFileSync(group.target.path, next, "utf8");
+  }
+
+  for (const { target, result } of results) {
+    if (target.kind === "legacy" && !check) {
+      fs.writeFileSync(target.path, result.source, "utf8");
+    }
+  }
 }
 
 function main() {
@@ -244,7 +298,8 @@ function main() {
   const targets = findTargets(platforms);
 
   if (targets.length === 0) {
-    console.log("  [skip] No chunk contains realtime voice auth gate logic");
+    console.log("  [x] No realtime voice auth gate found in legacy or Rspack frontend");
+    process.exitCode = 1;
     return;
   }
 
@@ -252,11 +307,11 @@ function main() {
   let totalFound = 0;
   let totalPatched = 0;
   const relevantPlatforms = new Set();
+  const completed = [];
 
   for (const target of targets) {
-    const source = fs.readFileSync(target.path, "utf8");
     const startedAt = Date.now();
-    const result = patchSource(source);
+    const result = patchSource(target.source);
 
     if (result.status === "parse-error") {
       console.log(`  [x] ${relPath(target.path)}: parse failed`);
@@ -270,14 +325,23 @@ function main() {
     }
     if (result.status === "already-patched") {
       relevantPlatforms.add(target.platform);
+      console.log(
+        `  [ok] ${relPath(target.path)}${target.moduleId ? `#${target.moduleId}` : ""}: already patched`,
+      );
       continue;
     }
-    if (result.status === "not-applicable") continue;
+    if (result.status === "not-applicable") {
+      console.log(
+        `  [x] ${relPath(target.path)}${target.moduleId ? `#${target.moduleId}` : ""}: voice markers found but auth gate is unrecognized`,
+      );
+      failed++;
+      continue;
+    }
 
     relevantPlatforms.add(target.platform);
     totalFound += result.patches.length;
     console.log(
-      `  [${target.platform}] ${relPath(target.path)} (parse ${Date.now() - startedAt}ms)`,
+      `  [${target.platform}] ${relPath(target.path)}${target.moduleId ? `#${target.moduleId}` : ""} (parse ${Date.now() - startedAt}ms)`,
     );
 
     if (isCheck) {
@@ -292,8 +356,15 @@ function main() {
     for (const patch of result.patches) {
       console.log(`    * ${patch.original} -> ${patch.replacement}`);
     }
-    fs.writeFileSync(target.path, result.source, "utf8");
+    completed.push({ target, result });
     totalPatched += result.patches.length;
+  }
+
+  try {
+    writePatchedTargets(completed, isCheck);
+  } catch (error) {
+    console.log(`  [x] realtime voice output: ${error.message}`);
+    failed++;
   }
 
   if (totalPatched > 0) {
@@ -319,6 +390,7 @@ if (require.main === module) main();
 
 module.exports = {
   collectPatches,
+  findTargets,
   hasPatchedVoiceGate,
   patchSource,
 };

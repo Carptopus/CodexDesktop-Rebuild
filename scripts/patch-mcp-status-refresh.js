@@ -9,6 +9,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
+const { frontendFiles, isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
 const { literal: staticValue, walk } = require("./patch-ast-util");
 const { relPath, SRC_DIR } = require("./patch-util");
 
@@ -288,6 +289,58 @@ function targetDirectories(platform) {
   })).filter((item) => fs.existsSync(item.path));
 }
 
+function patchRspackSource(source) {
+  if (source.includes(MARKER)) { validatePatchedSource(source); return { status: "already-patched", source }; }
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const branch = targetCase(ast);
+  const sequence = branch.consequent[0].expression;
+  if (sequence.type !== "SequenceExpression" || sequence.expressions.length !== 2) throw new Error("Rspack MCP 通知表达式漂移");
+  const [ready, scoped] = sequence.expressions;
+  const text = node => source.slice(node.start, node.end);
+  const notification = text(ready.test).match(/([\w$]+)\.params\.status/)?.[1];
+  const scheduled = ready.consequent?.expressions?.[1];
+  const timerGuard = scheduled?.type === "LogicalExpression" && scheduled.operator === "&&" ? scheduled.left : null;
+  const assignment = scheduled?.right;
+  const timeout = assignment?.right;
+  if (!notification || timerGuard?.type !== "BinaryExpression" || timeout?.callee?.name !== "setTimeout"
+    || staticValue(timeout.arguments[1]) !== 0 || assignment.left.type !== "Identifier") throw new Error("Rspack MCP 刷新计时器漂移");
+  const callback = timeout.arguments[0];
+  const work = callback.body.body.at(-1)?.expression;
+  const guarded = work?.expressions?.at(-1);
+  const calls = guarded?.right?.expressions;
+  if (calls?.length !== 2 || !text(calls[1]).includes("mention-discovery")) throw new Error("Rspack MCP 刷新回调漂移");
+  const inventory = calls[0], mention = calls[1];
+  const queryKey = objectProperty(mention.arguments[1], "queryKey")?.value;
+  if (inventory.type !== "CallExpression" || inventory.callee.type !== "Identifier" || queryKey?.elements.length !== 3
+    || queryKey.elements[0]?.type !== "SpreadElement" || queryKey.elements[1]?.type !== "Identifier") throw new Error("Rspack MCP 目录调用漂移");
+  const helpers = [];
+  walk(ast, node => { if (node.type === "VariableDeclarator" && node.id.name === inventory.callee.name) helpers.push(node); });
+  if (helpers.length !== 1 || !["installed-inventory", "installed"].every(term => text(helpers[0]).includes(term))) throw new Error("Rspack MCP inventory helper 缺失");
+  const queryClient = text(mention.arguments[0]), base = text(queryKey.elements[0].argument), host = text(queryKey.elements[1]);
+  const refresh = `(${text(mention.callee)})`;
+  const light = `${refresh}(${queryClient},{queryKey:[...${base},${host},\`toolsAndAuthOnly\`],exact:!0},{cancelRefetch:!1})`;
+  const full = `${queryClient}.invalidateQueries({queryKey:[...${base},${host}],predicate:({queryKey:e})=>e.length===${base}.length+2&&e[${base}.length+1]===\`full\`,refetchType:\`none\`})${MARKER}`;
+  const owner = [];
+  walk(ast, node => { if (node.type === "FunctionDeclaration" && node.start < branch.start && node.end > branch.end) owner.push(node); });
+  const fn = owner.sort((a,b) => a.end-a.start-(b.end-b.start))[0];
+  if (!fn || scoped.type !== "ConditionalExpression" || !text(scoped.consequent).includes(`queryKey:[...${base},${host}]`)) throw new Error("Rspack MCP 全局刷新漂移");
+  const readyCapture = ready.consequent.expressions[0];
+  const replacement = `(${text(ready.test)}||${text(scoped.test)})&&(${text(ready.test)}&&(__codexMcpThreadReadyPending=!0,${text(readyCapture)}),${text(assignment.left)}??=setTimeout(()=>{${text(assignment.left)}=void 0;let __codexReady=__codexMcpThreadReadyPending;__codexMcpThreadReadyPending=!1;${text(callback.body.body[1])}${text(work.expressions[0])};${text(guarded.left)}&&(${light},__codexReady&&${text(inventory)},${text(mention)},${full})},${REFRESH_DELAY_MS})),${notification}.params.threadId==null&&(${text(ready.alternate)}),${text(scoped.alternate)}`;
+  let next = source.slice(0, sequence.start) + replacement + source.slice(sequence.end);
+  next = next.slice(0, fn.body.start+1) + "let __codexMcpThreadReadyPending=!1;" + next.slice(fn.body.start+1);
+  validatePatchedSource(next);
+  return { status: "patched", source: next };
+}
+
+function patchRspack(directory, check) {
+  const targets = findFrontendModules(directory, { all: ["mcpServer/startupStatus/updated", "mention-discovery", "toolsAndAuthOnly"],
+    test: source => { try { targetCase(parse(source, { ecmaVersion: "latest", sourceType: "module" })); return true; } catch { return false; } } });
+  if (!targets.length || new Set(targets.map(target => target.id)).size !== 1) throw new Error("Rspack MCP 状态模块不唯一");
+  const plans = targets.map(target => ({ target, result: patchRspackSource(target.source) }));
+  for (const { target, result } of plans) if (!check && result.status === "patched") fs.writeFileSync(target.file, replaceFrontendModule(target, result.source), "utf8");
+  console.log(`  [ok] Rspack MCP 250ms 轻量刷新与 Full stale 已核对${check ? "；dry-run" : ""}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find((arg) => PLATFORMS.includes(arg));
@@ -297,9 +350,9 @@ function main() {
   let patched = 0;
   for (const directory of directories) {
     try {
-      const results = fs.readdirSync(directory.path)
-        .filter((name) => name.endsWith(".js"))
-        .map((name) => ({ name, path: path.join(directory.path, name) }))
+      if (isRspackFrontend(directory.path)) { patchRspack(directory.path, check); continue; }
+      const results = frontendFiles(directory.path)
+        .map(file => ({ name: path.basename(file), path: file }))
         .map((file) => ({ ...file, source: fs.readFileSync(file.path, "utf8") }))
         .map((file) => ({ file, result: patchSource(file.source) }))
         .filter((item) => item.result.status !== "not-applicable");
@@ -330,4 +383,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { MARKER, REFRESH_DELAY_MS, patchSource };
+module.exports = { MARKER, REFRESH_DELAY_MS, patchSource, patchRspackSource };

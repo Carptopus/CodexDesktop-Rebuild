@@ -18,6 +18,11 @@ const path = require("path");
 const acorn = require("acorn");
 const { key, literal, nodes } = require("./patch-ast-util");
 const { locateBundles, listBuildBundles, relPath, SRC_DIR } = require("./patch-util");
+const {
+  findFrontendModules,
+  isRspackFrontend,
+  replaceFrontendModule,
+} = require("./rspack-util");
 
 function walkArchive(node, visitor) {
   if (!node || typeof node !== "object") return;
@@ -205,6 +210,27 @@ function bindingNames(root, value) {
     (node.type === "VariableDeclarator" && node.init === value && node.id?.type === "Identifier") ||
     (node.type === "AssignmentExpression" && node.right === value && node.left?.type === "Identifier"))
     .map(owner => owner.type === "VariableDeclarator" ? owner.id.name : owner.left.name);
+}
+
+function bindingAliases(root, initial) {
+  const names = new Set(initial);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes(root, item =>
+      (item.type === "VariableDeclarator" && item.id?.type === "Identifier" &&
+        item.init?.type === "Identifier") ||
+      (item.type === "AssignmentExpression" && item.left?.type === "Identifier" &&
+        item.right?.type === "Identifier"))) {
+      const target = node.type === "VariableDeclarator" ? node.id.name : node.left.name;
+      const source = node.type === "VariableDeclarator" ? node.init.name : node.right.name;
+      if (names.has(source) && !names.has(target)) {
+        names.add(target);
+        changed = true;
+      }
+    }
+  }
+  return names;
 }
 
 function objectProperty(node, name) {
@@ -470,6 +496,103 @@ function hasSplitMainDeleteChain(mainAst, serviceAst) {
   return true;
 }
 
+function inspectArchiveRowFunctions(ast, source, archivedProps = false) {
+  return nodes(ast, node => node.type === "FunctionDeclaration").filter(fn => {
+    const patterns = [fn.params, ...nodes(fn.body, node => node.type === "ObjectPattern")].flat();
+    const bindings = patterns.filter(pattern => pattern?.type === "ObjectPattern").map(pattern =>
+      Object.fromEntries(pattern.properties.filter(property => property.type === "Property" &&
+        property.value?.type === "Identifier").map(property => [key(property.key), property.value.name])));
+    const props = bindings.find(item => item.onDelete &&
+      (archivedProps
+        ? item.archivedThread && item.isDeleteDisabled
+        : item.showDeleteButton));
+    if (props == null) return false;
+    const invokesDelete = nodes(fn.body, node =>
+      node.type === "CallExpression" && node.callee?.type === "Identifier" &&
+      node.callee.name === props.onDelete).length > 0;
+    const clickHandler = nodes(fn.body, node => node.type === "Property" &&
+      key(node.key) === "onClick" && node.value?.type === "ArrowFunctionExpression" &&
+      nodes(node.value, call => call.type === "CallExpression" &&
+        call.callee?.type === "Identifier" && call.callee.name === props.onDelete).length === 1);
+    return invokesDelete || clickHandler.length > 0;
+  });
+}
+
+function inspectCurrentArchiveRowLink(ast, mutationFunction, rowFunctions) {
+  const statePairs = nodes(mutationFunction, node => node.type === "VariableDeclarator" &&
+    node.id?.type === "ArrayPattern" && node.id.elements.length >= 2 &&
+    node.id.elements[0]?.type === "Identifier" && node.id.elements[1]?.type === "Identifier" &&
+    literal(node.init?.arguments?.[0]) === null)
+    .map(node => ({ value: node.id.elements[0].name, setter: node.id.elements[1].name }));
+  const confirms = nodes(mutationFunction, node => node.type === "Property" &&
+    key(node.key) === "onConfirm" && node.value?.type === "Identifier");
+  const linked = new Set();
+
+  for (const confirm of confirms) {
+    const confirmFunction = functionForBinding(mutationFunction, confirm.value.name);
+    if (confirmFunction == null) continue;
+    for (const state of statePairs) {
+      const clearsState = nodes(confirmFunction, call => call.type === "CallExpression" &&
+        call.callee?.type === "Identifier" && call.callee.name === state.setter &&
+        literal(call.arguments[0]) === null).length === 1;
+      const mutatesState = nodes(confirmFunction, call => call.type === "CallExpression" &&
+        memberName(call.callee) === "mutate" && nodes(call.arguments[0],
+          item => item.type === "MemberExpression" && item.object?.name === state.value).length > 0)
+        .length > 0;
+      if (!clearsState || !mutatesState) continue;
+
+      const directSetters = nodes(mutationFunction, node =>
+        (node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression") &&
+        nodes(node, call => call.type === "CallExpression" &&
+          call.callee?.type === "Identifier" && call.callee.name === state.setter &&
+          nodes(call.arguments[0], item => item.type === "Property" &&
+            key(item.key) === "kind" && literal(item.value) === "single").length === 1).length > 0)
+        .flatMap(callback => bindingNames(mutationFunction, callback));
+      const setters = bindingAliases(mutationFunction, directSetters);
+      if (setters.size === 0) continue;
+
+      for (const rowFunction of rowFunctions) {
+        const groups = nodes(ast, node => node.type === "FunctionDeclaration" &&
+          nodes(node.body, call => call.type === "CallExpression" &&
+            ((call.callee?.type === "Identifier" && call.callee.name === rowFunction.id.name) ||
+              (call.arguments[0]?.type === "Identifier" &&
+                call.arguments[0].name === rowFunction.id.name)) &&
+            call.arguments[1]?.type === "ObjectExpression" &&
+            objectProperty(call.arguments[1], "onDelete")?.value?.type === "Identifier").length === 1)
+          .filter(group => {
+            const groupBindings = [
+              ...group.params,
+              ...nodes(group.body, node => node.type === "ObjectPattern"),
+            ].filter(pattern => pattern?.type === "ObjectPattern").map(pattern =>
+              Object.fromEntries(pattern.properties.filter(property => property.type === "Property" &&
+                property.value?.type === "Identifier").map(property =>
+                [key(property.key), property.value.name])));
+            return groupBindings.some(bindings => {
+              const onDelete = bindings.onDelete;
+              if (onDelete == null) return false;
+              return nodes(group.body, call => call.type === "CallExpression" &&
+                ((call.callee?.type === "Identifier" && call.callee.name === rowFunction.id.name) ||
+                  (call.arguments[0]?.type === "Identifier" &&
+                    call.arguments[0].name === rowFunction.id.name)) &&
+                objectProperty(call.arguments[1], "onDelete")?.value?.name === onDelete).length === 1;
+            });
+          });
+        for (const group of groups) {
+          if (nodes(mutationFunction, call => call.type === "CallExpression" &&
+            ((call.callee?.type === "Identifier" && call.callee.name === group.id.name) ||
+              (call.arguments[0]?.type === "Identifier" &&
+                call.arguments[0].name === group.id.name)) &&
+            objectProperty(call.arguments[1], "onDelete")?.value?.type === "Identifier" &&
+            setters.has(objectProperty(call.arguments[1], "onDelete").value.name)).length === 1) {
+            linked.add(rowFunction);
+          }
+        }
+      }
+    }
+  }
+  return [...linked];
+}
+
 function inspectNativeArchiveDelete(code, protocolCode, runtimeCode = protocolCode, mainCode = protocolCode, serviceCode = null) {
   const ast = acorn.parse(code, { ecmaVersion: "latest", sourceType: "module" });
   const protocolAst = acorn.parse(protocolCode, { ecmaVersion: "latest", sourceType: "module" });
@@ -484,33 +607,20 @@ function inspectNativeArchiveDelete(code, protocolCode, runtimeCode = protocolCo
       .map(property => key(property.key)));
     return names.has("showDeleteButton") && names.has("onDelete");
   });
-  if (deleteProps.length < 1) return null;
-
-  const rowFunctions = nodes(ast, node => node.type === "FunctionDeclaration").filter(fn => {
-    const patterns = [fn.params, ...nodes(fn.body, node => node.type === "ObjectPattern")].flat();
-    const bindings = patterns.filter(pattern => pattern?.type === "ObjectPattern").map(pattern =>
-      Object.fromEntries(pattern.properties.filter(property => property.type === "Property" &&
-        property.value?.type === "Identifier").map(property => [key(property.key), property.value.name])));
-    const props = bindings.find(item => item.showDeleteButton && item.onDelete);
-    if (props == null) return false;
-    const usesDeleteGuard = nodes(fn.body, node => node.type === "Identifier" &&
-      node.name === props.showDeleteButton).length > 1;
-    const invokesDelete = nodes(fn.body, node =>
-      (node.type === "CallExpression" && node.callee?.type === "Identifier" &&
-        node.callee.name === props.onDelete) ||
-      (node.type === "Property" && key(node.key) === "onClick" &&
-        node.value?.type === "Identifier" && node.value.name === props.onDelete)).length > 0;
-    return usesDeleteGuard && invokesDelete;
-  });
-  if (rowFunctions.length !== 1) return null;
-  const linkedDeleteProps = inspectRowMutationLink(
+  let rowFunctions = inspectArchiveRowFunctions(ast, code);
+  let linkedDeleteProps = deleteProps.length > 0 ? inspectRowMutationLink(
     ast,
     mutationFunctions[0],
     rowFunctions,
     deleteProps,
     serviceCode != null,
-  );
-  if (linkedDeleteProps.length < 1) return null;
+  ) : [];
+  if (linkedDeleteProps.length < 1) {
+    rowFunctions = inspectArchiveRowFunctions(ast, code, true);
+    const linkedRows = inspectCurrentArchiveRowLink(ast, mutationFunctions[0], rowFunctions);
+    if (rowFunctions.length !== 1 || linkedRows.length !== 1) return null;
+    linkedDeleteProps = linkedRows;
+  }
 
   const managerChains = inspectManagerDeleteChain(protocolAst);
   if (managerChains.length !== 1) return null;
@@ -823,6 +933,151 @@ function patchDataControls(bundles, isCheck) {
   return patched;
 }
 
+function parseRspackModule(module) {
+  return acorn.parse(module.source, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowReturnOutsideFunction: true,
+  });
+}
+
+function hasRspackRuntimeDelete(module) {
+  const ast = parseRspackModule(module);
+  return nodes(ast, node =>
+    (node.type === "Property" || node.type === "MethodDefinition") &&
+    key(node.key) === "deleteArchivedThreads").some((method) => {
+    const calls = nodes(method, node => node.type === "CallExpression" &&
+      ["deleteArchivedThread", "deleteAllArchivedThreads"].includes(memberName(node.callee)));
+    const names = new Set(calls.map(call => memberName(call.callee)));
+    return names.has("deleteArchivedThread") && names.has("deleteAllArchivedThreads");
+  });
+}
+
+function locateRspackArchiveArtifacts(assetsDir) {
+  const modules = findFrontendModules(assetsDir, {
+    test: (source) => source.includes("deleteArchivedConversation") ||
+      source.includes("deleteAllArchivedConversations") ||
+      source.includes("deleteArchivedThreads") ||
+      source.includes("listArchivedThreads") ||
+      (source.includes("modelProviders") && source.includes("archived")),
+  });
+  const providerTargets = modules.flatMap((module) => {
+    const result = analyzeArchivedListProviders(module.source);
+    return result.edits > 0 || result.alreadyAllProviders > 0
+      ? [{ module, result }]
+      : [];
+  });
+  const uiTargets = modules.filter((module) => {
+    try {
+      return inspectMutationChain(parseRspackModule(module), module.source).length === 1 &&
+        module.source.includes("deleteArchivedConversation") &&
+        module.source.includes("deleteAllArchivedConversations");
+    } catch {
+      return false;
+    }
+  });
+  const runtimeTargets = modules.filter((module) => {
+    try {
+      return hasRspackRuntimeDelete(module);
+    } catch {
+      return false;
+    }
+  });
+  const managerTargets = modules.filter((module) => {
+    if (!module.source.includes("listArchivedThreads")) return false;
+    try {
+      return inspectManagerDeleteChain(parseRspackModule(module)).length === 1;
+    } catch {
+      return false;
+    }
+  });
+  return { providerTargets, uiTargets, runtimeTargets, managerTargets };
+}
+
+function patchRspackArchiveProviders(assetsDir, isCheck) {
+  const { providerTargets } = locateRspackArchiveArtifacts(assetsDir);
+  if (providerTargets.length === 0) {
+    throw new Error("Rspack archived list provider query target not found");
+  }
+  let patched = 0;
+  let already = 0;
+  for (const { module, result } of providerTargets) {
+    patched += result.edits;
+    already += result.alreadyAllProviders;
+    console.log(
+      `  [${isCheck ? "?" : "ok"}] ${relPath(module.file)}#${module.id}: ` +
+      `${result.edits} archived list call(s) to patch, ` +
+      `${result.alreadyAllProviders} already query all providers`,
+    );
+  }
+  if (isCheck || patched === 0) return { patched, already };
+
+  const pending = providerTargets
+    .filter(({ result }) => result.edits > 0)
+    .map(({ module }) => ({ file: module.file, id: module.id }));
+  while (pending.length > 0) {
+    const expected = pending.shift();
+    const current = findFrontendModules(assetsDir, {
+      test: (_source, module) => module.id === expected.id,
+    }).filter((module) => module.file === expected.file);
+    if (current.length !== 1) {
+      throw new Error(
+        `Rspack archived provider target changed or became ambiguous: ${expected.file}#${expected.id}`,
+      );
+    }
+    const [target] = current;
+    const result = analyzeArchivedListProviders(target.source);
+    if (result.edits === 0) {
+      if (result.alreadyAllProviders > 0) continue;
+      throw new Error(
+        `Rspack archived provider target no longer matches: ${expected.file}#${expected.id}`,
+      );
+    }
+    fs.writeFileSync(
+      target.file,
+      replaceFrontendModule(target, result.code),
+      "utf8",
+    );
+  }
+  return { patched, already };
+}
+
+function inspectRspackNativeArchiveDelete(assetsDir) {
+  const { uiTargets, runtimeTargets, managerTargets } =
+    locateRspackArchiveArtifacts(assetsDir);
+  if (uiTargets.length !== 1 || runtimeTargets.length !== 1 || managerTargets.length !== 1) {
+    throw new Error(
+      "Rspack 归档删除链路数量异常：" +
+      `ui=${uiTargets.length}, runtime=${runtimeTargets.length}, manager=${managerTargets.length}`,
+    );
+  }
+  const [ui] = uiTargets;
+  const [runtime] = runtimeTargets;
+  const [manager] = managerTargets;
+  const inspection = inspectNativeArchiveDelete(
+    ui.source,
+    manager.source,
+    runtime.source,
+    manager.source,
+  );
+  if (inspection == null) {
+    throw new Error("Rspack 原生归档删除或确认链未通过完整校验");
+  }
+  return { ...inspection, ui, runtime, manager };
+}
+
+function patchRspackArchivePlatform(platform, isCheck) {
+  const assetsDir = path.join(SRC_DIR, platform, "_asar", "webview", "assets");
+  console.log(`  [layer 0] ${platform}: Rspack archived lists query all model providers`);
+  const providerResult = patchRspackArchiveProviders(assetsDir, isCheck);
+  const native = inspectRspackNativeArchiveDelete(assetsDir);
+  console.log(
+    `  [ok] ${platform}: native archived deletion verified ` +
+    `(${native.mutationFunction}/${native.rowFunction}, ${native.deleteProps} row)`,
+  );
+  return providerResult;
+}
+
 // ─── Main ───────────────────────────────────────────────────────
 
 function main() {
@@ -832,18 +1087,41 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  console.log("  [layer 0] archived lists: query all model providers");
-  const providerResult = patchArchivedProviderQueries(
-    locateArchivedProviderBundles(platform),
-    isCheck,
-  );
+  const expectedPlatforms = platform
+    ? [platform]
+    : ["mac-arm64", "mac-x64", "win"].filter(name =>
+      fs.existsSync(path.join(SRC_DIR, name, "_asar")));
+  const rspackPlatforms = expectedPlatforms.filter(name =>
+    isRspackFrontend(path.join(SRC_DIR, name, "_asar", "webview", "assets")));
+  const legacyPlatforms = expectedPlatforms.filter(name =>
+    !rspackPlatforms.includes(name));
+  let providerPatched = 0;
+  let providerAlready = 0;
+  let nativeCount = 0;
+  for (const current of rspackPlatforms) {
+    const result = patchRspackArchivePlatform(current, isCheck);
+    providerPatched += result.patched;
+    providerAlready += result.already;
+    nativeCount++;
+  }
 
-  const dataControlsBundles = locateDataControlsBundles(platform);
-  const protocolBundles = locateBundles({
-    dir: "assets",
-    pattern: /^app-initial-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  });
+  console.log("  [layer 0] archived lists: query all model providers");
+  const legacyProviderBundles = legacyPlatforms.flatMap(current =>
+    locateArchivedProviderBundles(current));
+  if (legacyProviderBundles.length > 0) {
+    const result = patchArchivedProviderQueries(legacyProviderBundles, isCheck);
+    providerPatched += result.patched;
+    providerAlready += result.already;
+  }
+
+  const dataControlsBundles = legacyPlatforms.flatMap(current =>
+    locateDataControlsBundles(current));
+  const protocolBundles = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-initial-.*\.js$/,
+      }).filter(bundle => legacyPlatforms.includes(bundle.platform))
+    : [];
   const protocolByPlatform = new Map();
   for (const bundle of protocolBundles) {
     if (protocolByPlatform.has(bundle.platform)) {
@@ -851,11 +1129,13 @@ function main() {
     }
     protocolByPlatform.set(bundle.platform, fs.readFileSync(bundle.path, "utf-8"));
   }
-  const runtimeBundles = locateBundles({
-    dir: "assets", pattern: /^renderer-app-server-managers-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  });
-  const buildBundles = listBuildBundles(platform);
+  const runtimeBundles = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets", pattern: /^renderer-app-server-managers-.*\.js$/,
+      }).filter(bundle => legacyPlatforms.includes(bundle.platform))
+    : [];
+  const buildBundles = listBuildBundles().filter(bundle =>
+    legacyPlatforms.includes(bundle.platform));
   const nativeBundles = dataControlsBundles.filter((bundle) => {
     const protocolCode = protocolByPlatform.get(bundle.platform);
     if (protocolCode == null) return false;
@@ -879,16 +1159,13 @@ function main() {
   }
 
   console.log("  [layer 1] app-main: delete-conversation route");
-  const appMainBundles = locateBundles({
-    dir: "assets",
-    pattern: /^app-main-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  });
-  const expectedPlatforms = platform
-    ? [platform]
-    : ["mac-arm64", "mac-x64", "win"].filter(name =>
-      fs.existsSync(path.join(SRC_DIR, name, "_asar")));
-  for (const name of expectedPlatforms) {
+  const appMainBundles = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-main-.*\.js$/,
+      }).filter(bundle => legacyPlatforms.includes(bundle.platform))
+    : [];
+  for (const name of legacyPlatforms) {
     if (nativePlatforms.has(name)) continue;
     const appMainCount = appMainBundles.filter(bundle => bundle.platform === name).length;
     const dataControlsCount = dataControlsBundles.filter(bundle => bundle.platform === name).length;
@@ -911,8 +1188,9 @@ function main() {
   );
 
   console.log(
-    `  [done] providers: ${providerResult.patched} patched/${providerResult.already} already, ` +
-    `native: ${nativeBundles.length}, routes: ${routePatched}, buttons: ${btnPatched}`,
+    `  [done] providers: ${providerPatched} patched/${providerAlready} already, ` +
+    `native: ${nativeCount + nativeBundles.length}, ` +
+    `routes: ${routePatched}, buttons: ${btnPatched}`,
   );
 }
 
@@ -923,6 +1201,8 @@ module.exports = {
   hasNativeArchiveDelete,
   inspectNativeArchiveDelete,
   hasSplitMainDeleteChain,
+  inspectArchiveRowFunctions,
+  inspectCurrentArchiveRowLink,
   inspectRowMutationLink,
   patchAppMain,
   patchArchivedListProviders,

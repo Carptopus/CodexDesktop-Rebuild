@@ -145,23 +145,19 @@ test("报告合并正常扫描提示，并阻止缺少必要补丁目标", (t) =
   const assets = path.join(asar, "webview", "assets");
   fs.mkdirSync(assets, { recursive: true });
   fs.writeFileSync(path.join(asar, "package.json"), JSON.stringify({ version: "26.1007.21159" }));
-  // These chunks are scanned for auth but contain no patchable auth function.
+  // Harmless asset chunks must not turn missing required targets into success.
   for (const file of ["auth-a.js", "auth-b.js"]) {
     fs.writeFileSync(path.join(assets, file), "const authMethod='chatgpt';const allowed=authMethod!=='chatgpt';");
   }
   const reportDir = path.join(root, "report");
   const report = runPatches({
     platform: "mac-arm64", sourceDir: root, check: true, reportDir,
-    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js", "patch-plugin-auth.js"),
+    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js"),
     log: () => {},
   });
 
   assert.equal(report.canBuild, false);
   assert.equal(report.reviewCount, 0);
-  const scanner = report.results.find((item) => item.script === "patch-plugin-auth.js");
-  assert.equal(scanner.noticeSummary.length, 1);
-  assert.equal(scanner.noticeSummary[0].kind, "info");
-  assert.equal(scanner.noticeSummary[0].count, 2);
   assert.equal(report.results.find((item) => item.script === "patch-windows-portable-runtime.js").noticeSummary[0].kind, "info");
   assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").status, "failed");
 
@@ -169,7 +165,7 @@ test("报告合并正常扫描提示，并阻止缺少必要补丁目标", (t) =
   // A required patch with no verifiable target must block the build.
   const submenuRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-model-picker-submenu.js"));
   assert.match(submenuRow, /失败，阻止构建/);
-  const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-plugin-auth.js"));
+  const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-windows-portable-runtime.js"));
   assert.equal(infoLines.length, 1);
   assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);
 });

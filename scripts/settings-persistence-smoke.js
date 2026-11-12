@@ -91,8 +91,8 @@ async function main() {
       return "light";
     };
     ipcRenderer.invoke = (channel, value) => { assert.equal(channel, CHANNELS.write); return handlers.get(channel)(event(), value); };
-    const exposed = {}, win = { addEventListener() {}, dispatchEvent() {}, location: { origin: "app://-" } };
-    vm.runInNewContext(patchedPreload, { require(name) { assert.equal(name, "electron"); return { ipcRenderer, contextBridge: { exposeInMainWorld(name, value) { exposed[name] = value; } }, webUtils: {} }; }, module: { exports: {} }, window: win, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64" }, console });
+    const exposed = {}, win = { addEventListener() {}, dispatchEvent() {}, location: { href: "app://-/index.html", origin: "app://-" } };
+    vm.runInNewContext(patchedPreload, { require(name) { assert.equal(name, "electron"); return { ipcRenderer, contextBridge: { exposeInMainWorld(name, value) { exposed[name] = value; } }, webUtils: {} }; }, module: { exports: {} }, window: win, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64", argv: [] }, URL, console });
     return { bridge: exposed.electronBridge.rebuildSettings, sender, destroy() { sender.destroyed = true; sender.emit("destroyed"); } };
   }
   const a = renderer(), b = renderer(), outsider = renderer({ allowed: false }), subframe = renderer({ frame: false });

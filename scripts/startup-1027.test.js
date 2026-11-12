@@ -105,7 +105,24 @@ test("26.1027真实资源：组合应用、隔离顺序、官方可信 IPC 与�
     const context = { process: fakeProcess, console, require(name) { if (name === "electron") return { app }; if (name.startsWith("node:")) return require(name); return vm.runInNewContext(fs.readFileSync(path.join(build, name), "utf8"), context); } };
     vm.runInNewContext(fs.readFileSync(path.join(build, "codex-rebuild-test-environment.cjs"), "utf8"), context);
     const appName = setter.callee.object.object.name;
-    context[appName] = { app }; context.g = path; context.ec = "prod"; context.ep = "interactive";
+    context[appName] = { app };
+    const resolver = setter.arguments[1];
+    assert.equal(resolver.type, "CallExpression");
+    const resolverOptions = props(resolver.arguments[0]);
+    assert.equal(resolverOptions.buildFlavor.type, "Identifier");
+    context[resolverOptions.buildFlavor.name] = "prod";
+    const pathCalls = nodes(`(${slice(bootstrap, resolver.callee)})`, node => node.type === "CallExpression"
+      && node.callee.type === "SequenceExpression").map(node => node.callee.expressions.at(-1));
+    for (const member of pathCalls) {
+      if (member.type !== "MemberExpression" || member.object.type !== "Identifier") continue;
+      context[member.object.name] = ["resolve", "join"].includes(member.property.name)
+        ? path : { [member.property.name]: () => null };
+    }
+    const taskChecks = nodes(slice(bootstrap, lock), node => node.type === "BinaryExpression"
+      && [node.left, node.right].some(operand => operand.value === "startup-task"));
+    assert.equal(taskChecks.length, 1);
+    const taskKind = [taskChecks[0].left, taskChecks[0].right].find(node => node.type === "Identifier");
+    context[taskKind.name] = "interactive";
     vm.runInNewContext(bootstrap.slice(setter.start, hooks[0].end) + ";" + slice(bootstrap, lock), context);
     await Promise.resolve(); assert.deepEqual(order, ["userData", "sessionData", "lock"]);
     assert.equal(env.CODEX_HOME, isolatedHome); assert.ok(fs.existsSync(path.join(root, "profile", "isolation-runtime.json")));
@@ -127,19 +144,27 @@ test("26.1027真实资源：组合应用、隔离顺序、官方可信 IPC 与�
     const trusted = nodes(main, n => n.type === "VariableDeclarator" && n.id.name === trustedName && n.init?.type === "ArrowFunctionExpression" && n.init.body.callee?.property?.name === "isTrustedIpcSender"); assert.equal(trusted.length, 1);
     const validator = trusted[0].init.body.callee.object.name;
     let seenFrame;
-    const mainContext = { [validator]: { getContextForWebContents() { return {}; }, isTrustedIpcSender(actualSender, frame) { seenFrame = frame; return actualSender === sender && frame === sender.mainFrame; } }, [installArgs.codexHome.object.name]: { codexHome: isolatedHome }, N: "prod", eo: { ipcMain }, lx: new Proxy({}, { get: (_target, key) => `official:${String(key)}` }), require(name) { assert.equal(name, `./${MODULE}`); return { install(options) { return settings.install({ ...options, electron: { ipcMain } }); } }; } };
+    const mainContext = { [validator]: { getContextForWebContents() { return {}; }, isTrustedIpcSender(actualSender, frame) { seenFrame = frame; return actualSender === sender && frame === sender.mainFrame; } }, [installArgs.codexHome.object.name]: { codexHome: isolatedHome }, require(name) { assert.equal(name, `./${MODULE}`); return { install(options) { return settings.install({ ...options, electron: { ipcMain } }); } }; } };
     mainContext[trustedName] = vm.runInNewContext(`(${slice(main, trusted[0].init)})`, mainContext);
     const registrations = nodes(main, n => n.type === "CallExpression" && n.callee.type === "FunctionExpression" && n.arguments[0]?.type === "ObjectExpression" && props(n.arguments[0]).buildFlavor && props(n.arguments[0]).getContextForWebContents && props(n.arguments[0]).isTrustedIpcEvent);
     assert.equal(registrations.length, 1);
+    mainContext[props(registrations[0].arguments[0]).buildFlavor.name] = "prod";
+    const listeners = nodes(`(${slice(main, registrations[0].callee)})`, node => node.type === "CallExpression"
+      && node.callee.property?.name === "on" && node.callee.object.property?.name === "ipcMain");
+    assert.ok(listeners.length > 0, "真实官方 IPC 注册不能缺失");
+    for (const listener of listeners) {
+      mainContext[listener.callee.object.object.name] = { ipcMain };
+      mainContext[listener.arguments[0].object.name] = new Proxy({}, { get: (_target, key) => `official:${String(key)}` });
+    }
     vm.runInNewContext(`(${main.slice(registrations[0].start, installs[0].end)})`, mainContext);
-    assert.equal(ipcMain.listenerCount("official:AS"), 1, "新增挂载保留官方同步共享状态 IPC");
+    for (const listener of listeners) assert.equal(ipcMain.listenerCount(`official:${listener.arguments[0].property.name}`), 1, "新增挂载保留真实官方 IPC");
     const preload = sources.find(s => s.includes('exposeInMainWorld("electronBridge"'));
     function renderer(frame) {
       const ipcRenderer = new EventEmitter(), exposed = {};
       ipcRenderer.send = () => {};
       ipcRenderer.sendSync = channel => { if (channel === settings.CHANNELS.read) { const event = { sender, senderFrame: frame }; ipcMain.emit(channel, event); return event.returnValue; } if (channel.endsWith("get-sentry-init-options")) return { appVersion: "fixture" }; if (channel.endsWith("get-shared-object-snapshot")) return {}; return "light"; };
       ipcRenderer.invoke = (channel, patch) => handlers.get(channel)({ sender, senderFrame: frame }, patch);
-      vm.runInNewContext(preload, { require: () => ({ ipcRenderer, contextBridge: { exposeInMainWorld(k, v) { exposed[k] = v; } }, webUtils: {} }), module: { exports: {} }, window: { addEventListener() {}, location: { origin: "app://-" } }, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64" }, console });
+      vm.runInNewContext(preload, { require: () => ({ ipcRenderer, contextBridge: { exposeInMainWorld(k, v) { exposed[k] = v; } }, webUtils: {} }), module: { exports: {} }, window: { addEventListener() {}, dispatchEvent() {}, location: { href: "app://-/index.html", origin: "app://-" } }, document: { documentElement: { dataset: {} } }, performance: { timeOrigin: 0 }, process: { platform: "win32", arch: "x64", argv: [] }, URL, console });
       return exposed.electronBridge.rebuildSettings;
     }
     const bridge = renderer(sender.mainFrame); assert.equal(bridge.read().readingWidthPercent, 50); assert.equal(seenFrame, sender.mainFrame);
@@ -147,7 +172,7 @@ test("26.1027真实资源：组合应用、隔离顺序、官方可信 IPC 与�
     assert.equal(JSON.parse(fs.readFileSync(path.join(isolatedHome, "codex-rebuild-settings.json"))).readingWidthPercent, 70);
     const outsider = renderer({ url: "app://-/index.html" }); assert.match(outsider.read().error, /未受信任/); await assert.rejects(outsider.write({ readingWidthPercent: 80 }), /未受信任/);
     assert.equal(bridge.read().readingWidthPercent, 70);
-    assert.throws(() => patchPreload(preload.replace("getSharedObjectSnapshotValue:", "unknownSnapshot:")), /必要通信契约/);
+    assert.throws(() => patchPreload(preload.replace("subscribeToSystemThemeVariant:", "unknownThemeSubscription:")), /当前必要通信契约/);
     assert.throws(() => patchMain(main.replace(slice(main, trusted[0].init), slice(main, trusted[0].init).replace(".isTrustedIpcSender(", ".unknownSender("))), /可信校验/);
     const bootFile = path.join(build, [...originals.keys()].find(name => originals.get(name) === bootstrap));
     fs.writeFileSync(bootFile, bootstrap.replace("requestSingleInstanceLock({startupTask:", "unknownLock({startupTask:")); run("patch-test-isolation.js", ["--check"], false);

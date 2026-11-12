@@ -125,3 +125,36 @@ test("新版批量按钮和单条行共用待确认状态", () => {
   assert.equal(check(source), 1);
   assert.equal(check(source.replace('setPending({kind:"all"})', 'noop({kind:"all"})')), 0);
 });
+
+test("当前归档行通过同一函数对象的别名连接到单条确认状态", () => {
+  const acorn = require("acorn");
+  const {
+    inspectArchiveRowFunctions,
+    inspectCurrentArchiveRowLink,
+  } = require("./patch-archive-delete");
+  const source = [
+    'function Screen(){const [pending,setPending]=useState(null);',
+    'const mutation={mutate(){}};',
+    'const confirm=()=>{if(pending!=null){setPending(null);',
+    'mutation.mutate({kind:"single",thread:pending.thread})}};',
+    'useDialog({onConfirm:confirm});',
+    'const F=e=>setPending({kind:"single",thread:e});const ts=F;',
+    'return ui(Group,{onDelete:ts});}',
+    'function Group(input){const {onDelete:remove}=input;',
+    'return ui(Row,{archivedThread:thread,isDeleteDisabled:false,onDelete:remove});}',
+    'function Row(input){const {archivedThread:thread,isDeleteDisabled,onDelete:remove}=input;',
+    'return ui("button",{onClick:()=>remove()});}',
+  ].join("");
+  const ast = acorn.parse(source, { ecmaVersion: "latest" });
+  const [screen] = ast.body;
+  const rows = inspectArchiveRowFunctions(ast, source, true);
+  assert.deepEqual(rows.map((row) => row.id.name), ["Row"]);
+  assert.deepEqual(
+    inspectCurrentArchiveRowLink(ast, screen, rows).map((row) => row.id.name),
+    ["Row"],
+  );
+
+  const renamedWithoutAlias = source.replace("const ts=F;", "const ts=other;");
+  const missing = acorn.parse(renamedWithoutAlias, { ecmaVersion: "latest" });
+  assert.equal(inspectCurrentArchiveRowLink(missing, missing.body[0], rows).length, 0);
+});

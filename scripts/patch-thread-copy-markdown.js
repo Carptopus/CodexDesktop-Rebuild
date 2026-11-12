@@ -4,6 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
+const {
+  findFrontendModules,
+  isRspackFrontend,
+  replaceFrontendModule,
+  rspackModules,
+  moduleExports,
+} = require("./rspack-util");
 
 const MARKER = "/* CodexRebuild: copy complete conversation Markdown */";
 const ERROR_ID = "threadActions.copyConversationMarkdown.copyConversationMarkdownError";
@@ -16,6 +23,14 @@ function walk(node, visit) {
     if (Array.isArray(value)) value.forEach((child) => walk(child, visit));
     else if (value?.type) walk(value, visit);
   }
+}
+
+function collect(node, predicate) {
+  const matches = [];
+  walk(node, (candidate) => {
+    if (predicate(candidate)) matches.push(candidate);
+  });
+  return matches;
 }
 
 function name(node) { return node?.name ?? node?.value ?? null; }
@@ -66,16 +81,55 @@ function findHelpers(ast, source) {
 
 function validatePatched(source) {
   if (source.split(MARKER).length !== 2) throw new Error("补丁标记数量异常");
-  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-  const marked = [];
-  walk(ast, (node) => {
-    if (node.type === "FunctionDeclaration" && source.slice(node.start, node.end).includes(MARKER)) marked.push(node);
+  const ast = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+    allowReturnOutsideFunction: true,
   });
+  const marked = collect(ast, (node) =>
+    ["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type) &&
+    node.body?.type === "BlockStatement" &&
+    source.slice(node.body.start + 1).startsWith(MARKER));
   if (marked.length !== 1) throw new Error("补丁标记未唯一位于复制动作中");
   const body = source.slice(marked[0].start, marked[0].end);
-  if (!body.includes("force:!0") || !body.includes("getConversation") ||
-      !body.includes("会话历史不完整") || !body.includes("无法写入剪贴板")) {
+  if (!body.includes("force:!0") ||
+      !body.includes("getConversation(") ||
+      !body.includes("会话历史不完整") ||
+      !body.includes("无法写入剪贴板")) {
     throw new Error("补丁完整历史或失败保护结构异常");
+  }
+}
+
+function validateRspackPatched(source) {
+  if (source.split(MARKER).length !== 2) throw new Error("补丁标记数量异常");
+  const ast = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowReturnOutsideFunction: true,
+  });
+  const marked = collect(ast, (node) =>
+    ["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type) &&
+    node.body?.type === "BlockStatement" &&
+    source.slice(node.body.start + 1).startsWith(MARKER));
+  if (marked.length !== 1) throw new Error("补丁标记未唯一位于复制动作中");
+  const [action] = marked;
+  const body = source.slice(action.start, action.end);
+  const ensureCalls = collect(action, (node) =>
+    node.type === "CallExpression" &&
+    name(node.callee?.property) === "ensureConversationHistoryLoaded");
+  const rendered = collect(action, (node) =>
+    node.type === "VariableDeclarator" && node.init?.type === "AwaitExpression" &&
+    node.init.argument?.type === "CallExpression" &&
+    node.init.argument.callee?.type === "MemberExpression" &&
+    node.init.argument.callee.object?.type === "Identifier" &&
+    node.init.argument.callee.object.name === "__crMarkdown");
+  if (ensureCalls.length !== 1 || ensureCalls[0].start > rendered[0]?.init?.start ||
+      rendered.length !== 1 ||
+      !source.slice(ensureCalls[0].arguments[2]?.start, ensureCalls[0].arguments[2]?.end)
+        .includes("force:!0") ||
+      !body.includes("无法写入剪贴板") ||
+      !body.includes("会话没有可复制的内容")) {
+    throw new Error("Rspack 完整历史复制或失败保护结构异常");
   }
 }
 
@@ -156,6 +210,118 @@ function patchSource(source) {
   return { status: "patched", source: result };
 }
 
+function patchRspackModuleSource(module) {
+  const source = module.source;
+  if (source.includes(MARKER)) {
+    try {
+      validateRspackPatched(source);
+      return { status: "already-patched", source };
+    } catch (error) {
+      return { status: "unexpected-shape", source, reason: error.message };
+    }
+  }
+  if (!source.includes(ERROR_ID)) return { status: "signature-missing", source };
+
+  let ast;
+  try {
+    ast = parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+    });
+  } catch (error) {
+    return { status: "parse-error", source, reason: error.message };
+  }
+
+  const candidates = collect(ast, (node) =>
+    ["FunctionExpression", "ArrowFunctionExpression"].includes(node.type) &&
+    node.params[0]?.type === "ObjectPattern" &&
+    source.slice(node.start, node.end).includes(ERROR_ID));
+  if (candidates.length !== 1) {
+    return { status: "ambiguous-copy-action", source, count: candidates.length };
+  }
+
+  const action = candidates[0];
+  const bindings = new Map(action.params[0].properties
+    .filter((property) => property.type === "Property")
+    .map((property) => [name(property.key), name(property.value)]));
+  const requiredBindings = ["scope", "conversationId", "parentConversationId", "getMarkdown", "intl"];
+  if (!requiredBindings.every((key) => bindings.has(key))) {
+    return { status: "unsupported-copy-structure", source };
+  }
+
+  const ensureCalls = collect(action, (node) => node.type === "CallExpression" &&
+    name(node.callee?.property) === "ensureConversationHistoryLoaded");
+  const markdownDeclarations = collect(action, (node) => node.type === "VariableDeclarator" &&
+    node.id?.type === "Identifier" && node.init?.type === "AwaitExpression" &&
+    name(node.init.argument?.callee) === bindings.get("getMarkdown"));
+  const statements = collect(action, (node) => node.type === "ExpressionStatement" &&
+    node.expression?.type === "LogicalExpression" &&
+    source.slice(node.start, node.end).includes("copyConversationMarkdownSuccess"));
+  if (ensureCalls.length !== 1 || markdownDeclarations.length !== 1 || statements.length !== 1 ||
+      ensureCalls[0].arguments.length !== 2 ||
+      name(ensureCalls[0].arguments[0]) !== bindings.get("conversationId")) {
+    return { status: "unsupported-copy-structure", source };
+  }
+
+  const statement = statements[0];
+  const copies = collect(statement, (node) => node.type === "AwaitExpression" &&
+    node.argument?.type === "CallExpression" && node.argument.arguments.length === 1 &&
+    name(node.argument.arguments[0]) === markdownDeclarations[0].id.name);
+  const successes = collect(statement, (node) => node.type === "CallExpression" &&
+    name(node.callee?.property) === "success" &&
+    source.slice(node.start, node.end).includes("copyConversationMarkdownSuccess"));
+  if (copies.length !== 1 || successes.length !== 1) {
+    return { status: "unsupported-copy-structure", source };
+  }
+  const copy = copies[0];
+  const success = successes[0];
+
+  const renderExports = rspackModules(module.chunkSource).flatMap((dependency) => {
+    if (!dependency.source.includes("renderConversationMarkdown")) return [];
+    return moduleExports(dependency)
+      .filter(({ value }) => value.includes("conversationId") &&
+        value.includes("visibleTurnEntries") && value.includes(".get("))
+      .map((entry) => ({ ...entry, dependency }));
+  });
+  if (renderExports.length !== 1) {
+    return { status: "unsupported-history-renderer", source };
+  }
+  const [{ dependency: renderModule, exported: renderExport }] = renderExports;
+
+  const ensure = ensureCalls[0];
+  const markdown = markdownDeclarations[0];
+  const value = markdown.id.name;
+  const scope = bindings.get("scope");
+  const conversationId = bindings.get("conversationId");
+  const renderedMarkdown =
+    `await __crMarkdown.${renderExport}(${scope},` +
+    `{conversationId:${conversationId},isBackgroundSubagentsEnabled:!0})`;
+  const guards =
+    `if(${value}==null||0===${value}.trim().length)throw new Error("会话没有可复制的内容");` +
+    `if(!(${source.slice(copy.start, copy.end)}))throw new Error("无法写入剪贴板");` +
+    `${source.slice(success.start, success.end)};`;
+  const edits = [
+    { start: markdown.init.start, end: markdown.init.end, replacement: renderedMarkdown },
+    { start: ensure.end - 1, replacement: ",{force:!0}" },
+    { start: statement.start, end: statement.end, replacement: guards },
+    {
+      start: action.body.start + 1,
+      replacement: `${MARKER}var __crMarkdown=${module.requireName}(${JSON.stringify(renderModule.id)});`,
+    },
+  ].sort((left, right) => right.start - left.start);
+  let result = source;
+  for (const edit of edits) {
+    result = result.slice(0, edit.start) + edit.replacement + result.slice(edit.end ?? edit.start);
+  }
+  try {
+    validateRspackPatched(result);
+  } catch (error) {
+    return { status: "invalid-patch-result", source, reason: error.message };
+  }
+  return { status: "patched", source: result };
+}
+
 function findTargets(platform) {
   const requested = platform ? [platform] : PLATFORMS;
   const targets = [];
@@ -163,6 +329,18 @@ function findTargets(platform) {
   for (const current of requested) {
     const assets = path.join(SRC_DIR, current, "_asar", "webview", "assets");
     if (!fs.existsSync(assets)) continue;
+    if (isRspackFrontend(assets)) {
+      const candidates = findFrontendModules(assets, {
+        any: [ERROR_ID, MARKER],
+        test: (source) => source.includes(ERROR_ID) || source.includes(MARKER),
+      });
+      if (candidates.length !== 1) {
+        errors.push(`${current}: Rspack 复制动作模块数量异常（${candidates.length}）`);
+        continue;
+      }
+      targets.push({ platform: current, rspack: true, ...candidates[0] });
+      continue;
+    }
     const files = fs.readdirSync(assets).filter((file) => /^app-(?:initial|primary)-.*\.js$/.test(file));
     const candidates = files.map((name) => {
       const file = path.join(assets, name);
@@ -188,11 +366,16 @@ function main() {
   for (const error of errors) { console.error(`  [x] ${error}`); process.exitCode = 1; }
   if (!targets.length && !errors.length) { console.error("  [x] 缺少目标平台界面资源"); process.exitCode = 1; }
   for (const target of targets) {
-    const result = patchSource(target.source);
-    if (result.status === "already-patched") console.log(`  [ok] ${relPath(target.path)}: already patched`);
+    const label = relPath(target.rspack ? target.file : target.path);
+    const result = target.rspack ? patchRspackModuleSource(target) : patchSource(target.source);
+    if (result.status === "already-patched") console.log(`  [ok] ${label}: already patched`);
     else if (result.status === "patched") {
-      if (!check) fs.writeFileSync(target.path, result.source, "utf8");
-      console.log(`  [ok] ${relPath(target.path)}: ${check ? "check only; no write" : "patched"}`);
+      if (!check) {
+        fs.writeFileSync(target.rspack ? target.file : target.path,
+          target.rspack ? replaceFrontendModule(target, result.source) : result.source,
+          "utf8");
+      }
+      console.log(`  [ok] ${label}: ${check ? "check only; no write" : "patched"}`);
     } else {
       console.error(`  [x] ${target.platform}: ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
       process.exitCode = 1;
@@ -205,4 +388,12 @@ if (require.main === module) {
   catch (error) { console.error(`  [x] ${error.message}`); process.exitCode = 1; }
 }
 
-module.exports = { ERROR_ID, MARKER, patchSource, findTargets, validatePatched };
+module.exports = {
+  ERROR_ID,
+  MARKER,
+  patchSource,
+  patchRspackModuleSource,
+  findTargets,
+  validatePatched,
+  validateRspackPatched,
+};

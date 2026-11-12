@@ -138,13 +138,18 @@ function saveCompatibilityEvidence(
   const functionalSignatures = ["mcpServer/startupStatus/updated", "mention-discovery",
     "Failed to sync local remote control enablement", "set-remote-control-connections-enabled",
     "remote-connections/gate-bridge", "isConfigDataPending", "codex.profileFooter.settingsFallback",
-    "chatgptAccentPicker.ChatGptAccentPicker.updateError", "--color-image-generation-accent"];
+    "chatgptAccentPicker.ChatGptAccentPicker.updateError", "--color-image-generation-accent",
+    "supportsThreadTimeline", "submitDisabledReasons", "threadActions.copyConversationMarkdown",
+    "deleteArchivedConversation", "settings.appearance.visualStyle"];
   const files = [];
   for (const [label, directory] of [["main", ".vite/build"], ["webview", "webview/assets"]]) {
     const sourceDirectory = path.join(asarRoot, directory);
-    for (const name of fs.readdirSync(sourceDirectory).filter((name) => /\.(?:js|css)$/.test(name))) {
+    const names = fs.readdirSync(sourceDirectory).flatMap(name => name === "async" && label === "webview"
+      ? fs.readdirSync(path.join(sourceDirectory, name)).map(child => path.join(name, child)) : [name]);
+    for (const name of names.filter((name) => /\.(?:js|css)$/.test(name))) {
       const file = path.join(sourceDirectory, name);
       const text = fs.readFileSync(file, "utf8");
+      if (label === "webview" && text.slice(0, 220).includes("exports=JSON.parse(")) continue;
       const matches = [...signatures, ...functionalSignatures, "settings.appearance.visualStyle", "--thread-content-expanded-max-width", "--markdown-wide-block-max-width"]
         .filter((signature) => text.includes(signature));
       const startupEvidence = label === "main" && /^(?:early-bootstrap|startup-requirements|application-network-startup)/.test(name);
@@ -163,8 +168,9 @@ function saveCompatibilityEvidence(
         matches.includes("Failed to read service tier for request");
       const readingEvidence = matches.includes("settings.appearance.visualStyle") || name.endsWith(".css") && matches.some(match => match.startsWith("--"));
       if (copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence || settingsBridgeEvidence) {
-        fs.mkdirSync(path.join(destination, label), { recursive: true });
-        fs.copyFileSync(file, path.join(destination, label, name));
+        const target = path.join(destination, label, name);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
       }
       files.push({ directory, name, matches, copied: copied || serviceTierEvidence || readingEvidence || startupEvidence || frontendEvidence || settingsBridgeEvidence, sha256: crypto.createHash("sha256").update(text).digest("hex") });
     }
@@ -322,7 +328,9 @@ async function candidate(options) {
   runScript("patch-all.js", ["win", "--check", "--report", checkDirectory]);
   runScript("patch-all.js", ["win", "--report", applyDirectory]);
   runScript("settings-persistence-smoke.js", []);
-  writeJson(path.join(root, "patch-reports", "frontend-source-checks.json"), require("./frontend-source-smoke").verifyFrontendSource(path.join(root, "src", "win", "_asar", "webview", "assets")));
+  const frontendChecks = await require("./frontend-source-smoke").verifyFrontendSource(
+    path.join(root, "src", "win", "_asar", "webview", "assets"));
+  writeJson(path.join(root, "patch-reports", "frontend-source-checks.json"), frontendChecks);
   runScript("build-from-upstream.js", ["--platform", "win", "--defer-zip"]);
   const reports = { check: readJson(path.join(checkDirectory, "report.json")), apply: readJson(path.join(applyDirectory, "report.json")) };
   const verified = await inspectOutput(path.join(root, "out", "win", "Codex-win32-x64"), source, reports, directory);

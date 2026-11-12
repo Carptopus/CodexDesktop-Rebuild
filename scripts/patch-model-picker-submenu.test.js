@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { patchSource } = require("./patch-model-picker-submenu");
+const { inspectNativeModelList, patchSource } = require("./patch-model-picker-submenu");
 
 function createBundle(extraProps = "", trailingProps = "") {
   return [
@@ -39,4 +39,27 @@ test("模型选择器子菜单补丁拒绝缺失标签锚点的结构", () => {
 
   assert.equal(result.status, "unexpected-row-props-count");
   assert.equal(result.count, 0);
+});
+
+test("新版模型选择器以 for-of 直接生成可点击的单选行时安全跳过", () => {
+  const source = [
+    "function Picker({modelListConfig:config,menuView:view,onToggleMenuView:toggle}){",
+    "let rows=[];for(const model of config.options){",
+    "rows.push(jsx(UI.Item,{\"data-model-selected\":model.selected,",
+    "role:\"menuitemradio\",onSelect:event=>{",
+    "event.preventDefault();model.onSelect();toggle(\"simple\")},children:model.label},model.id))}",
+    "return jsx(\"div\",{\"data-model-picker-view\":view,children:rows})}",
+  ].join("");
+  assert.deepEqual(inspectNativeModelList(source), {
+    functionName: "Picker",
+    directRows: 1,
+  });
+  assert.equal(inspectNativeModelList(source.replace("event.preventDefault();", "")), null);
+  assert.equal(
+    inspectNativeModelList(source.replace(
+      "let rows=[];",
+      "let rows=[jsx(UI.ms.FlyoutSubmenuItem,{})];",
+    )),
+    null,
+  );
 });

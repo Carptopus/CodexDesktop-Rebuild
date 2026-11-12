@@ -7,7 +7,8 @@ const vm = require("node:vm");
 const { pathToFileURL } = require("node:url");
 const { parse } = require("acorn");
 const { nodes, unique } = require("./patch-ast-util");
-const { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, isSidebarSignature, patchSource } = require("./patch-sidebar-usage");
+const { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, findRspackSidebarTarget, isSidebarSignature, patchSource } = require("./patch-sidebar-usage");
+const { isRspackFrontend } = require("./rspack-util");
 
 const fixture = `let usageAtom;
 async function fetchUsage(){return http("/wham/usage")}
@@ -29,18 +30,40 @@ async function main() {
   const args = process.argv.slice(2);
   let source = fixture, relatedSources = [], rendererPath = path.join(__dirname, "runtime/sidebar-usage.mjs"), origin = "内置功能样本";
   let rendererUrl = pathToFileURL(rendererPath).href;
+  let rspack;
   if (args[0] === "--assets" && args.length === 2) {
     const assets = path.resolve(args[1]);
-    const target = findSidebarTarget(assets);
+    const target = isRspackFrontend(assets) ? findRspackSidebarTarget(assets) : findSidebarTarget(assets);
+    if (target.usageAtomExpression) rspack = target;
     source = target.source;
-    if (!source.includes("/wham/usage")) {
+    if (!rspack && !source.includes("/wham/usage")) {
       const initial = unique(fs.readdirSync(assets).filter(name => /^app-initial-[^/\\]+\.js$/.test(name)), "共享账户额度 Bundle");
       relatedSources = [{ name: initial, source: fs.readFileSync(path.join(assets, initial), "utf8") }];
     }
-    origin = `${assets}:${target.name}`;
+    origin = `${assets}:${target.name ?? path.relative(assets, target.file)}${rspack ? `#${target.id}` : ""}`;
+    if (rspack && source.includes(MARKER)) {
+      const embedded = fs.readFileSync(path.join(assets, MODULE), "utf8");
+      assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"));
+      rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
+    }
   } else if (["--asar", "--source-asar"].includes(args[0]) && args.length === 2) {
     const asar = await import("@electron/asar");
     const files = asar.listPackage(args[1]);
+    const virtual = { files: files.map(file => file.replace(/^[/\\]/, ""))
+      .filter(file => /^webview[/\\]assets[/\\].*\.js$/.test(file)),
+      readFile: file => asar.extractFile(args[1], file).toString() };
+    if (isRspackFrontend(virtual)) {
+      rspack = findRspackSidebarTarget(virtual);
+      source = rspack.source;
+      origin = `${args[1]}:${rspack.file}#${rspack.id}`;
+      if (args[0] === "--asar") {
+        assert.ok(source.includes(MARKER), "成品 ASAR 必须已包含额度补丁");
+        assert.ok(rspack.chunkSource.includes(`from "../${MODULE}"`), "真实分块必须导入根目录渲染模块");
+        const embedded = asar.extractFile(args[1], `webview\\assets\\${MODULE}`).toString();
+        assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"));
+        rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
+      }
+    } else {
     const candidates = files.filter(name => /app-(?:primary|initial)-[^/\\]+\.js$/.test(name));
     const matches = candidates.map(name => ({ name, source: asar.extractFile(args[1], name.replace(/^[/\\]/, "")).toString() }))
       .filter(file => isSidebarSignature(file.source));
@@ -57,6 +80,7 @@ async function main() {
       assert.equal(embedded.replace(/\r\n/g, "\n"), fs.readFileSync(rendererPath, "utf8").replace(/\r\n/g, "\n"), "候选渲染模块与当前源码不一致");
       rendererUrl = `data:text/javascript;base64,${Buffer.from(embedded).toString("base64")}`;
     }
+    }
   } else assert.equal(args.length, 0, "用法：node scripts/sidebar-usage-smoke.js [--assets PATH | --asar PATH | --source-asar PATH]");
   if (relatedSources.length && !source.includes(MARKER)) {
     const sourceAst = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -67,7 +91,7 @@ async function main() {
     assert.equal(rejected.status, "unexpected-shape");
     assert.match(rejected.reason, /账户额度导入链/);
   }
-  const result = patchSource(source, { relatedSources });
+  const result = patchSource(source, { relatedSources, rspack });
   assert.ok(["patched", "already-patched"].includes(result.status), result.reason);
   assert.equal(patchSource(result.source).source, result.source, "重复应用必须幂等");
   const ast = parse(result.source, { ecmaVersion: "latest", sourceType: "module" });
@@ -84,22 +108,34 @@ async function main() {
   const account = unique(ast.body.filter(node => node.id?.name === ACCOUNT_COMPONENT), "额度组件");
   const declarations = nodes(account, node => node.type === "VariableDeclarator");
   const binding = name => unique(declarations.filter(node => node.id.name === name), name).init;
-  const authHook = binding("auth").callee.name, readHook = binding("usage").callee.name;
-  const intlHook = binding("intl").callee.name;
-  const jsxCall = unique(nodes(outer, node => node.type === "CallExpression" && node.callee.type === "SequenceExpression"), "组件 JSX");
+  const jsxCall = unique(nodes(outer, node => node.type === "CallExpression" && node.callee.type === "SequenceExpression"
+    && node.callee.expressions.at(-1)?.property?.name === "jsx"), "组件 JSX");
   const jsxName = jsxCall.callee.expressions.at(-1).object.name;
   const atom = {}, fallback = { type: "native-avatar", props: {} }, state = {};
   const jsx = { jsx: (type, props) => typeof type === "function" ? type(props) : { type, props } };
   jsx.jsxs = jsx.jsx;
   const { renderSidebarUsage } = await import(rendererUrl);
-  const context = {
-    [authHook]: () => state.auth,
-    [readHook]: value => { assert.equal(value, atom); state.reads++; return { data: state.usage }; },
-    [binding("usage").arguments[0].name]: atom,
-    [intlHook]: () => ({ locale: state.locale, formatNumber: (number, options) => new Intl.NumberFormat(state.locale, options).format(number) }),
-    [account.body.body[0].expression.callee.name]: () => {},
-    [jsxName]: jsx, [RENDER]: renderSidebarUsage,
+  const context = { [jsxName]: jsx, [RENDER]: renderSidebarUsage };
+  const bind = (expression, implementation) => {
+    const node = expression.type === "SequenceExpression" ? expression.expressions.at(-1) : expression;
+    if (node.type === "Identifier") context[node.name] = implementation;
+    else {
+      assert.equal(node.type, "MemberExpression"); assert.equal(node.object.type, "Identifier");
+      (context[node.object.name] ??= {})[node.computed ? node.property.value : node.property.name] = implementation;
+    }
   };
+  bind(binding("auth").callee, () => state.auth);
+  bind(binding("usage").callee, value => { assert.equal(value, atom); state.reads++; return { data: state.usage }; });
+  bind(binding("intl").callee, () => ({ locale: state.locale, formatNumber: (number, options) => new Intl.NumberFormat(state.locale, options).format(number) }));
+  const usageReference = binding("usage").arguments[0];
+  if (usageReference.type === "MemberExpression" && usageReference.object.type === "CallExpression") {
+    context[usageReference.object.callee.name] = id => {
+      assert.equal(id, usageReference.object.arguments[0].value);
+      return { [usageReference.computed ? usageReference.property.value : usageReference.property.name]: atom };
+    };
+  } else bind(usageReference, atom);
+  const initialize = account.body.body[0];
+  if (initialize.type === "ExpressionStatement") bind(initialize.expression.callee, () => {});
   const bridgeSource = [outer, account].map(node => result.source.slice(node.start, node.end)).join("\n");
   vm.createContext(context);
   vm.runInContext(bridgeSource, context, { timeout: 2000 });
@@ -163,7 +199,7 @@ async function main() {
     if (!(node.name in context)) context[node.name] = null;
   }
   context[iconAlias] = tree;
-  context[nativeButton.arguments[0].name] = props => jsx.jsx("button", props);
+  bind(nativeButton.arguments[0], props => jsx.jsx("button", props));
   context[buttonProps.onClick.name] = () => { state.menuOpened = true; };
   const button = vm.runInContext(result.source.slice(nativeButton.start, nativeButton.end), context, { timeout: 2000 });
   assert.equal(button.props.children[1], tree);

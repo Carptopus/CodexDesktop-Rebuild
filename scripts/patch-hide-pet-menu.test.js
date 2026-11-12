@@ -54,3 +54,11 @@ test("只包含 Pet 本地化文案的资源不构成菜单目标", () => {
 
   assert.equal(patchSource(source).status, "not-applicable");
 });
+
+test("Rspack 只修改菜单模块并保留同块依赖工厂", () => {
+  const source = `export const __webpack_modules__={menu(e,t,n){${fixture()}},other(e){e.exports="retained"}};`;
+  const result = patchSource(source);
+  assert.equal(result.status, "patched");
+  assert.ok(result.source.includes('other(e){e.exports="retained"}'));
+  assert.equal(patchSource(result.source).status, "already-patched");
+});

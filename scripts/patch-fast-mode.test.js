@@ -1,5 +1,24 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { patchRspackSource } = require("./patch-fast-mode");
+
+test("Rspack memo 缓存随 API-key、ChatGPT 和 Bedrock 认证切换更新", () => {
+  const source = 'function useAccess(){let t,n,u,d=cache,c=host,p=c,m=auth,g=m?.authMethod==="chatgpt"||m?.authMethod==="personalAccessToken"||m?.authMethod==="amazonBedrock",f=m?.authMethod??null;d[0]!==p||d[1]!==f?(t={authMethod:f,hostId:p},d[0]=p,d[1]=f,d[2]=t):t=d[2];let{data:h,isPending:v}=query(t),w=!!m?.isLoading||g&&v;d[3]!==h||d[4]!==w||d[5]!==g?(n=g&&!w&&null!=h?map(h):null,d[3]=h,d[4]=w,d[5]=g,d[6]=n):n=d[6];let b=n;return d[7]!==w||d[8]!==b?(u={serviceTierAccess:b,isLoading:w},d[7]=w,d[8]=b,d[9]=u):u=d[9],u}';
+  const result = patchRspackSource(source, "settings");
+  const cache = Array(10).fill(Symbol());
+  let auth, pending = true;
+  const run = Function("cache", "host", "query", "map", "readAuth", `return function(){let auth=readAuth();${result.source};return useAccess()}`)(
+    cache, "local", () => ({ data: { fast: false, ultrafast: true }, isPending: pending }), value => value, () => auth);
+  auth = { authMethod: "apikey", isLoading: false };
+  assert.deepEqual(run(), { serviceTierAccess: { fast: true, ultrafast: true }, isLoading: false });
+  auth = { authMethod: "chatgpt", isLoading: false };
+  assert.deepEqual(run(), { serviceTierAccess: null, isLoading: true });
+  pending = false;
+  assert.deepEqual(run().serviceTierAccess, { fast: false, ultrafast: true });
+  auth = { authMethod: "amazonBedrock", isLoading: false };
+  assert.deepEqual(run().serviceTierAccess, { fast: false, ultrafast: true });
+  assert.equal(patchRspackSource(result.source, "settings").status, "already-patched");
+});
 
 const {
   REQUEST_ACCESS_MARKER,

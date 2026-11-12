@@ -5,6 +5,8 @@ const path = require("node:path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
 
+const { frontendFiles, rspackModules } = require("./rspack-util");
+
 const MARKER = "/* codex-rebuild-hide-pet-menu */";
 const LABEL_IDS = [
   "codex.profileFooter.showPet",
@@ -38,6 +40,13 @@ function propertyName(property) {
 }
 
 function patchSource(source) {
+  if (!LABEL_IDS.every(id=>source.includes(id)) || source.slice(0,220).includes("exports=JSON.parse(")) return {status:"not-applicable",source};
+  if (source.includes("export const __webpack_modules__=")) {
+    const targets = rspackModules(source).filter(item => LABEL_IDS.every(id => item.source.includes(id)));
+    if (targets.length !== 1) return { status: "unexpected-component-count", source };
+    const target = targets[0], result = patchSource(target.source);
+    return { ...result, source: source.slice(0, target.start) + result.source + source.slice(target.end) };
+  }
   if (!LABEL_IDS.every((id) => source.includes(id))) {
     return { status: "not-applicable", source };
   }
@@ -105,9 +114,7 @@ function locateTargets(platform) {
   for (const name of platforms) {
     const directory = path.join(SRC_DIR, name, "_asar", "webview", "assets");
     if (!fs.existsSync(directory)) continue;
-    const candidates = fs.readdirSync(directory)
-      .filter((file) => file.endsWith(".js"))
-      .map((file) => path.join(directory, file))
+    const candidates = frontendFiles(directory)
       .filter((file) => {
         const source = fs.readFileSync(file, "utf8");
         return LABEL_IDS.every((id) => source.includes(id));

@@ -2,6 +2,43 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { MARKER, getProviderMetadata, patchSource } = require("./patch-provider-quota");
+const { patchRspackComposer } = require("./patch-provider-quota");
+
+test("Rspack 按实际 Provider 隔离两项额度原因，保留其他禁发原因与 Hook", () => {
+  const source = 'function Composer(){let scope=useScope(),conversation=thread(),host=hostId(),saved=(0,read.thread)(deps.host,conversation),context;'
+    + 'cache()?(context={conversationId:conversation,hostId:host}):context=cached();'
+    + 'let config=useConfig(context),reserve=read.thread(quota.hard,host),usage=(0,read.value)("local"===host&&quota.usage);'
+    + 'save(config.isConfigDataPending,config.resolvedConfig,scope.value.kind);'
+    + 'let other=external&&"caller-disabled",blocked=reserve&&"reserve-limit",limited=usage&&"usage-limit";'
+    + 'return {submitDisabledReasons:[other,blocked,limited].filter(Boolean).join(",")}}';
+  const options = { providerModule: "provider", providerExport: "saved", imports: [{ local: "deps", id: "provider" }] };
+  const patched = patchRspackComposer(source, options);
+  assert.equal(patchRspackComposer(patched, options), patched);
+  const vm = require("node:vm");
+  let state = {}, hookCalls;
+  const deps = { host: {}, saved: {} }, quota = { hard: {}, usage: {} };
+  const context = vm.createContext({ URL, deps, quota, external: true, useScope: () => ({ value: state.scope ?? { kind: "local" } }),
+    thread: () => "thread-a", hostId: () => "local", cache: () => true, save() {}, useConfig: () => ({
+      isConfigDataPending: state.pending ?? false, resolvedConfig: {
+        model_provider: state.provider ?? "custom", model_providers: { custom: { base_url: state.baseUrl ?? "https://proxy.example/v1" } },
+      } }), read: { thread: atom => { hookCalls++; return atom === deps.saved ? state.savedProvider ?? null : true; },
+      value: () => { hookCalls++; return true; } } });
+  vm.runInContext(patched, context);
+  for (const [scenario, expected] of [
+    [{}, "caller-disabled"],
+    [{ baseUrl: "https://chatgpt.com/backend-api/codex" }, "caller-disabled,reserve-limit,usage-limit"],
+    [{ pending: true }, "caller-disabled,reserve-limit,usage-limit"],
+    [{ savedProvider: "openai" }, "caller-disabled,reserve-limit,usage-limit"],
+    [{ provider: "openai" }, "caller-disabled,reserve-limit,usage-limit"],
+    [{ scope: { kind: "cloud" } }, "caller-disabled,reserve-limit,usage-limit"],
+    [{ scope: { kind: "new", cloudThreadPrototype: true } }, "caller-disabled,reserve-limit,usage-limit"],
+  ]) {
+    state = scenario; hookCalls = 0;
+    assert.equal(context.Composer().submitDisabledReasons, expected);
+    assert.equal(hookCalls, 4, "原有 Hook 与新增 Provider Hook 每次仍无条件执行");
+  }
+  assert.throws(() => patchRspackComposer(source.replace('"usage-limit"', '"different-limit"'), options), /quota composer/);
+});
 
 function fixture() {
   return [

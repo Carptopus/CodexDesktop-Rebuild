@@ -14,6 +14,7 @@ const {
   LEGACY_MARKERS,
   MARKER,
   patchSource,
+  patchRspackNavigation,
 } = require("./patch-api-key-home-navigation");
 
 // 可选的官方资源功能验收；输入只读，直接执行已补丁的真实函数。
@@ -147,6 +148,20 @@ function clickHome(source, {
   invoke(activeStore, accountKey, rememberedValue, path => navigations.push(path));
   return navigations;
 }
+
+test("Rspack 独立恢复工厂保留 fresh 门槛并恢复 API-key 首页完整状态", () => {
+  const source = fixture().slice(fixture().indexOf("function restore"))
+    .replace("function restore", "const restore=function restore")
+    .replace("state:o})", "state:o,fresh:__fresh=!1})")
+    .replace("if(s&&c!=null", "if(!__fresh&&s&&c!=null")
+    .replace("function Rail", ";function Rail");
+  const result = patchRspackNavigation(source, "restore");
+  assert.deepEqual(clickHome(result.source), []);
+  assert.deepEqual(clickHome(result.source, { currentArea: "settings", sidebarThreadLocationId: null }), ["/thread/remembered"]);
+  assert.deepEqual(clickHome(result.source, { currentArea: "settings", sidebarThreadLocationId: null, hasRemembered: false }), ["/"]);
+  assert.match(result.source, /!__fresh&&/);
+  assert.equal(patchRspackNavigation(result.source, "restore").status, "already-patched");
+});
 
 test("API-key 在活动导航记录器写入真实会话", () => {
   const result = patchSource(fixture());

@@ -2,6 +2,31 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { MARKER, patchSource, validatePatchedSource } = require("./patch-remote-control");
+const { patchRspackSource } = require("./patch-remote-control");
+
+test("Rspack 两个 Remote Control 入口随完整账户状态禁用、启用及等待认证", () => {
+  const source = 'function p3(){let e,t,n=(0,c.c)(4),a=(0,E.gh)(T.u),i=(0,E.Ul)(rn.mi);return n[0]!==i||n[1]!==a?(e=()=>{null!=i&&(0,p1.V)(a,i).catch(e=>{(0,p2.l)(a,e),v.v.error("Failed to sync local remote control enablement",{safe:{},sensitive:{error:e}})})},t=[i,a],n[0]=i,n[1]=a,n[2]=e,n[3]=t):(e=n[2],t=n[3]),(0,u.useEffect)(e,t),null}function p5(){let e,t,n,a,i=(0,c.c)(10),{checkGate:r,isLoading:s}=(0,eg.cn)();i[0]!==r?(e=r(rt.Qg),i[0]=r,i[1]=e):e=i[1];let o=e;i[2]!==r||i[3]!==o?(t=r("1042620455")||o,i[2]=r,i[3]=o,i[4]=t):t=i[4];let l=t;return i[5]!==s||i[6]!==o||i[7]!==l?(n=()=>{let e=t5.appServices.remoteConnections;s||null==e||e.setRemoteControlEnabled({enabled:l,oneToOnePairingInAppEnabled:o}).catch(e=>{v.v.warning("[remote-connections/gate-bridge] sync_failed",{safe:{remoteControlConnectionsEnabled:l},sensitive:{error:e}})})},a=[s,o,l],i[5]=s,i[6]=o,i[7]=l,i[8]=n,i[9]=a):(n=i[8],a=i[9]),(0,u.useEffect)(n,a),null}';
+  const options = { requireName: "n", authId: "account", authExport: "PO" };
+  const result = patchRspackSource(source, options), atom = {}, calls = [];
+  let auth = { authMethod: "apikey", authLoading: true };
+  const bindings = { n: () => ({ PO: atom }), E: { gh: () => ({}), Ul: value => value === atom ? auth : true },
+    T: {}, rn: {}, p1: { V: (context, enabled) => { calls.push(enabled); return Promise.resolve(); } },
+    p2: {}, v: { v: {} }, u: { useEffect: callback => callback() }, eg: { cn: () => ({ checkGate: () => true, isLoading: false }) },
+    rt: {}, t5: { appServices: { remoteConnections: { setRemoteControlEnabled: value => { calls.push(value); return Promise.resolve(); } } } } };
+  const runtime = Function(...Object.keys(bindings), `${result.source};return {sync:p3,bridge:p5}`)(...Object.values(bindings));
+  runtime.sync(); runtime.bridge();
+  assert.deepEqual(calls, []);
+  auth = { authMethod: "apikey", authLoading: false };
+  runtime.sync(); runtime.bridge();
+  assert.deepEqual(calls.splice(0), [false, { enabled: false, oneToOnePairingInAppEnabled: false }]);
+  auth = { authMethod: "chatgpt", authLoading: false };
+  runtime.sync(); runtime.bridge();
+  assert.deepEqual(calls.splice(0), [true, { enabled: true, oneToOnePairingInAppEnabled: true }]);
+  auth = { authMethod: "personalAccessToken", authLoading: false };
+  runtime.sync(); runtime.bridge();
+  assert.deepEqual(calls.splice(0), [false, { enabled: false, oneToOnePairingInAppEnabled: false }]);
+  assert.equal(patchRspackSource(result.source, options).status, "already-patched");
+});
 
 function fixture() {
   return [

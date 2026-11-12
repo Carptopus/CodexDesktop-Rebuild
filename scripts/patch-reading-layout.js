@@ -4,6 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
 const { SRC_DIR } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
+const { nodes, unique, applyEdits } = require("./patch-ast-util");
 const MODULE = "codex-rebuild-reading-width.js";
 const MARKER = "__CodexRebuildReadingWidth";
 const PLACEMENT_MARKER = "/* codex-rebuild-reading-width:visual-card */";
@@ -20,11 +22,29 @@ function key(node) { return node?.name ?? node?.value; }
 function literal(node) { return node?.type === "Literal" ? node.value : node?.type === "TemplateLiteral" && !node.expressions.length ? node.quasis[0].value.cooked : null; }
 
 function patchDialogs(source) {
+  if (source.includes("export const __webpack_modules__=")) throw new Error("应传入对话框模块工厂正文");
   if (source.includes("codex-rebuild-dialog-default")) return source;
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
   const functions = ast.body.filter(node => node.type === "FunctionDeclaration" && node.params.length === 1 && node.body.body.length === 1
     && node.body.body[0].type === "ReturnStatement" && ["narrow", "compact", "wide", "xwide", "xxwide", "editor"].every(value => source.slice(node.start, node.end).includes(`\`${value}\``))
     && source.slice(node.start, node.end).includes("w-[380px]"));
+  if (!functions.length) {
+    const branches = nodes(ast, node => node.type === "ConditionalExpression" &&
+      node.test.type === "BinaryExpression" && ["narrow", "feature", "compact", "wide", "xwide", "xxwide", "editor"].includes(literal(node.test.left)) && typeof literal(node.consequent) === "string");
+    if (branches.length !== 7 || new Set(branches.map(branch => literal(branch.test.left))).size !== 7) {
+      throw new Error("原生内联对话框尺寸映射结构未知");
+    }
+    const edits = branches.map(branch => {
+      const size = literal(branch.test.left), classes = literal(branch.consequent);
+      if (!/(?:^|\s)w-(?:\[[^\]]+\]|[\w.]+)/.test(classes)) throw new Error(`对话框 ${size} 宽度结构未知`);
+      const replaced = classes.replace(/(?:^|\s)w-(?:\[[^\]]+\]|[\w.]+)/, " codex-rebuild-dialog-" + size).trim();
+      return { start: branch.consequent.start, end: branch.consequent.end, text: JSON.stringify(replaced) };
+    });
+    const defaults = nodes(ast, node => literal(node) === "w-130");
+    const fallback = unique(defaults, "默认对话框宽度");
+    edits.push({start:fallback.start,end:fallback.end,text:'"codex-rebuild-dialog-default"'});
+    return applyEdits(source, edits);
+  }
   if (functions.length !== 1) throw new Error("原生对话框尺寸映射结构未知");
   const edits = [], seen = new Set();
   let branch = functions[0].body.body[0].argument;
@@ -101,17 +121,17 @@ function patchSettings(source) {
   if (fonts.length !== 1) throw new Error("原生设置行结构未知");
   let row;
   walk(fonts[0], node => {
-    if (node.type !== "CallExpression" || node.arguments[0]?.type !== "Identifier" || node.arguments[1]?.type !== "ObjectExpression") return;
+    if (node.type !== "CallExpression" || node.arguments[1]?.type !== "ObjectExpression") return;
     const names = node.arguments[1].properties.map(prop => key(prop.key));
-    if (["label", "description", "control"].every(name => names.includes(name))) row = node.arguments[0].name;
+    if (["label", "description", "control"].every(name => names.includes(name))) row = source.slice(node.arguments[0].start, node.arguments[0].end);
   });
   // 从原生设置组件的 formatMessage 接收者，反向识别 useIntl 调用。
   const fontDeclarations = [];
   walk(fonts[0], node => { if (node.type === "VariableDeclarator") fontDeclarations.push(node); });
   walk(fonts[0], node => {
     if (node.type === "CallExpression" && node.callee.type === "MemberExpression" && key(node.callee.property) === "formatMessage") {
-      const declaration = fontDeclarations.find(item => item.id.name === node.callee.object.name && item.init?.type === "CallExpression" && item.init.callee.type === "Identifier");
-      if (declaration) intlCalls.push(declaration.init.callee.name);
+      const declaration = fontDeclarations.find(item => item.id.name === node.callee.object.name && item.init?.type === "CallExpression" && ["Identifier", "SequenceExpression"].includes(item.init.callee.type));
+      if (declaration) intlCalls.push(source.slice(declaration.init.callee.start, declaration.init.callee.end));
     }
   });
   if (!row || !intlCalls.length || new Set(intlCalls).size !== 1) throw new Error("原生设置行/语言上下文未知");
@@ -119,7 +139,7 @@ function patchSettings(source) {
   const placement = `,${PLACEMENT_MARKER}${appearanceProps.section}===\`visual\`&&(!${appearanceProps.showVariantTitle}||${appearanceProps.variant}===\`dark\`)&&(0,${cardJsx}.jsx)(${MARKER},{})`;
   const result = `import {renderReadingWidth as __renderCodexReadingWidth} from "./${MODULE}";\n`
     + source.slice(0, at) + placement + source.slice(at)
-    + `\nfunction ${MARKER}(){return __renderCodexReadingWidth(${states[0]},${jsx},${row},${intlCalls[0]}());}\n`;
+    + `\nfunction ${MARKER}(){return __renderCodexReadingWidth(${states[0]},${jsx},${row},(${intlCalls[0]})());}\n`;
   parse(result, { ecmaVersion: "latest", sourceType: "module" });
   return result;
 }
@@ -127,6 +147,25 @@ function patchSettings(source) {
 function main() {
   if (!process.argv.includes("win")) { console.log("[skip] Windows reading layout patch not applicable"); return; }
   const directory = path.join(SRC_DIR, "win", "_asar", "webview", "assets");
+  if (isRspackFrontend(directory)) {
+    const settings = unique(findFrontendModules(directory, {all:["settings.appearance.visualStyle", "chatgptAccentPicker.ChatGptAccentPicker.updateError"]}), "外观模块");
+    const entries = findFrontendModules(directory, {all:["thread-content-responsive-max-width", "@max-thread-expanded/app-shell-main-content:"]});
+    if (!entries.length) throw new Error("正文响应宽度模块缺失");
+    const dialogs = unique(findFrontendModules(directory, {all:["codex-dialog"], any:['"w-[380px]"', "codex-rebuild-dialog-default"]}), "对话框模块");
+    let settingsPatched = patchSettings(settings.source);
+    const importLine = 'import {renderReadingWidth as __renderCodexReadingWidth} from "./'+MODULE+'";';
+    settingsPatched = settingsPatched.replace(importLine, "/* "+MODULE+" */");
+    const settingsChunk = replaceFrontendModule(settings, settingsPatched, [importLine.replace('./'+MODULE,'../'+MODULE)]);
+    const entryChunks = [...new Map(entries.map(entry=>[entry.file, entry])).values()].map(entry=>({file:entry.file, source:replaceFrontendModule(entry, entry.source, ['import "../'+MODULE+'";'])}));
+    const dialogChunk = replaceFrontendModule(dialogs, patchDialogs(dialogs.source));
+    if (process.argv.includes("--check")) { console.log("[ok] Rspack 阅读布局结构检查通过"); return; }
+    fs.writeFileSync(settings.file, settingsChunk);
+    for (const entry of entryChunks) fs.writeFileSync(entry.file, entry.source);
+    fs.writeFileSync(dialogs.file, dialogChunk);
+    fs.copyFileSync(path.join(__dirname, "runtime", "reading-width.mjs"), path.join(directory, MODULE));
+    console.log("[ok] Rspack 阅读布局与对话框扩宽已应用");
+    return;
+  }
   const files = fs.readdirSync(directory).filter(name => name.endsWith(".js"));
   const settings = files.filter(name => /^general-settings-/.test(name)
     && fs.readFileSync(path.join(directory, name), "utf8").includes("settings.appearance.visualStyle"));
@@ -151,4 +190,4 @@ function main() {
   console.log("[ok] 已加入原生正文宽度设置、代码/表格宽度同步、对话框扩宽及粗体着色");
 }
 if (require.main === module) main();
-module.exports = { patchSettings };
+module.exports = { patchSettings, patchDialogs };

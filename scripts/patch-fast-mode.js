@@ -11,6 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
 const { relPath, SRC_DIR } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const SETTINGS_AUTH_MARKER = "/* CodexRebuildServiceTierApiKeyAuth */";
@@ -111,7 +112,8 @@ function findSettingsTarget(ast, source) {
           node.consequent?.type !== "CallExpression") return false;
       const identifiers = nodes(node.test, (item) => item.type === "Identifier")
         .map((item) => item.name);
-      return identifiers.includes(gate) && source.slice(node.test.start, node.test.end).includes("!=null");
+      return identifiers.includes(gate) && nodes(node.test, item => item.type === "BinaryExpression"
+        && item.operator === "!=" && (literal(item.left) === null || literal(item.right) === null)).length === 1;
     }, { skipNestedFunctions: true });
     if (pendingTerms.length !== 1 || accessConditions.length !== 1) continue;
     candidates.push({
@@ -246,6 +248,59 @@ function targetDirectories(platform) {
   })).filter((item) => fs.existsSync(item.path));
 }
 
+function patchRspackSource(source, role) {
+  const markers = role === "settings" ? [SETTINGS_AUTH_MARKER, SETTINGS_ACCESS_MARKER] : [REQUEST_ACCESS_MARKER];
+  if (markers.every(marker => count(source, marker) === 1)) {
+    parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    return { source, status: "already-patched" };
+  }
+  if (markers.some(marker => source.includes(marker))) throw new Error("service tier 补丁标记不完整");
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  const edits = [];
+  if (role === "settings") {
+    const target = findSettingsTarget(ast, source);
+    const text = node => source.slice(node.start, node.end);
+    edits.push({ start: target.authDeclaration.init.start, end: target.authDeclaration.init.end,
+      replacement: `${target.authExpression}===\`apikey\`?${SETTINGS_AUTH_MARKER}\`apikey\`:(${text(target.authDeclaration.init)})` },
+    { start: target.pending.start, end: target.pending.end,
+      replacement: `${target.gate}!==\`apikey\`&&(${text(target.pending)})` },
+    { start: target.access.start, end: target.access.end,
+      replacement: `${target.gate}===\`apikey\`?{fast:!0,ultrafast:!0}${SETTINGS_ACCESS_MARKER}:(${text(target.access)})` });
+  } else {
+    const guards = nodes(ast, node => node.type === "IfStatement" && returnsNull(node.consequent)
+      && exactAuthPair(node.test, source, "&&", "!==") != null);
+    if (guards.length !== 1) throw new Error(`service tier 请求认证门槛数量异常（${guards.length}）`);
+    const auth = exactAuthPair(guards[0].test, source, "&&", "!==");
+    edits.push({ start: guards[0].start, end: guards[0].start,
+      replacement: `if(${auth}===\`apikey\`)return{fast:!0,ultrafast:!0}${REQUEST_ACCESS_MARKER};` });
+  }
+  let next = source;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end);
+  parse(next, { ecmaVersion: "latest", sourceType: "module" });
+  if (!markers.every(marker => count(next, marker) === 1)) throw new Error("service tier 补丁验证失败");
+  return { status: "patched", source: next };
+}
+
+function patchRspack(directory, check) {
+  const plans = [];
+  for (const [role, all] of [["settings", ["serviceTierAccess", "authMethod", "isPending"]],
+    ["request", ["Failed to read service tier for request"]]]) {
+    const targets = findFrontendModules(directory, { all, test: source => {
+      if (role !== "settings") return true;
+      if (source.includes(SETTINGS_AUTH_MARKER)) return true;
+      try { findSettingsTarget(parse(source, { ecmaVersion: "latest", sourceType: "module" }), source); return true; }
+      catch { return false; }
+    } });
+    // Rspack 会在多个异步 chunk 中携带同一模块，各副本分别按结构验证。
+    if (!targets.length || new Set(targets.map(target => target.id)).size !== 1) throw new Error(`service tier ${role} 模块不唯一`);
+    for (const target of targets) plans.push({ target, result: patchRspackSource(target.source, role) });
+  }
+  for (const { target, result } of plans) if (!check && result.status === "patched") {
+    fs.writeFileSync(target.file, replaceFrontendModule(target, result.source), "utf8");
+  }
+  console.log(`  [ok] Rspack serviceTierAccess ${plans.length} 个模块副本已核对${check ? "；dry-run" : ""}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find((arg) => PLATFORMS.includes(arg));
@@ -255,6 +310,7 @@ function main() {
   let patched = 0;
   for (const directory of directories) {
     try {
+      if (isRspackFrontend(directory.path)) { patchRspack(directory.path, check); continue; }
       const results = fs.readdirSync(directory.path).filter((name) => name.endsWith(".js"))
         .map((name) => ({ name, path: path.join(directory.path, name) }))
         .map((file) => ({ ...file, source: fs.readFileSync(file.path, "utf8") }))
@@ -294,4 +350,5 @@ module.exports = {
   SETTINGS_ACCESS_MARKER,
   SETTINGS_AUTH_MARKER,
   patchSource,
+  patchRspackSource,
 };

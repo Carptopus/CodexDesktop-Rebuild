@@ -19,7 +19,12 @@
 const fs = require("fs");
 const path = require("path");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const {
+  findFrontendModules,
+  isRspackFrontend,
+  replaceFrontendModule,
+} = require("./rspack-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const LEGACY_MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
@@ -691,6 +696,144 @@ function patchSidebarSource(source, relatedSources = []) {
   return { status: "patched", source: next };
 }
 
+function patchRspackModuleSource(module) {
+  const source = module.source;
+  if (source.includes(MARKER)) {
+    return { status: "already-patched", source };
+  }
+  let ast;
+  try {
+    ast = acorn.parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+    });
+  } catch (error) {
+    return { status: "parse-failed", phase: "before", error, source };
+  }
+
+  const builders = [];
+  walk(ast, (node) => {
+    if (!["FunctionExpression", "ArrowFunctionExpression"].includes(node.type) ||
+        node.params[0]?.type !== "ObjectPattern" ||
+        !["targets", "onOpenInTarget"].every((name) =>
+          node.params[0].properties.some((property) =>
+            property.type === "Property" && propertyName(property) === name))) {
+      return;
+    }
+    const returns = node.body?.body?.filter((statement) =>
+      statement.type === "ReturnStatement" &&
+      statement.argument?.type === "ArrayExpression" &&
+      source.slice(statement.argument.start, statement.argument.end)
+        .includes("id:\"open-workspace-in\"")) ?? [];
+    if (returns.length > 0) builders.push({ node, returnNode: returns.at(-1) });
+  });
+  if (builders.length !== 1) {
+    return { status: "unexpected-menu-builder-count", count: builders.length, source };
+  }
+
+  const [{ node: builder, returnNode }] = builders;
+  const bindings = objectPatternBindings(builder.params[0]);
+  const targets = bindings.get("targets");
+  const openTarget = bindings.get("onOpenInTarget");
+  if (targets == null || openTarget == null) {
+    return { status: "missing-rspack-menu-bindings", source };
+  }
+
+  const callbacks = [];
+  walk(ast, (node) => {
+    if (node.type !== "Property" || propertyName(node) !== "onOpenInTarget" ||
+        !["ArrowFunctionExpression", "FunctionExpression"].includes(node.value?.type)) {
+      return;
+    }
+    if (source.slice(node.value.start, node.value.end)
+      .includes("persistPreferredTargetPath")) {
+      callbacks.push(node.value);
+    }
+  });
+  if (callbacks.length !== 1) {
+    return { status: "missing-workspace-open-callback", count: callbacks.length, source };
+  }
+  const [callback] = callbacks;
+  const setDataCalls = [];
+  const persistProperties = [];
+  walk(callback, (node) => {
+    if (node.type === "CallExpression" && memberName(node.callee) === "setData" &&
+        source.slice(node.start, node.end).includes("preferredTarget")) {
+      setDataCalls.push(node);
+    }
+    if (node.type === "Property" && propertyName(node) === "persistPreferredTargetPath") {
+      persistProperties.push(node);
+    }
+  });
+  if (setDataCalls.length !== 1 || persistProperties.length !== 1) {
+    return {
+      status: "unexpected-workspace-open-callback",
+      count: setDataCalls.length,
+      source,
+    };
+  }
+
+  const persist = "__crPersistPreferredTarget";
+  const items = "__crOpenWorkspaceItems";
+  const target = "__crFileManagerTarget";
+  const platform = "__crDesktopPlatform";
+  const setData = setDataCalls[0];
+  const persistProperty = persistProperties[0];
+  const originalItems = source.slice(returnNode.argument.start, returnNode.argument.end);
+  const replacement = [
+    `let ${target}=${targets}?.find(e=>e.target===\`fileManager\`);`,
+    `let ${items}=${originalItems};`,
+    `let ${platform}=(globalThis.navigator?.userAgentData?.platform??` +
+      `globalThis.navigator?.platform??\`\`).toLowerCase();`,
+    "return[",
+    `{${MARKER}`,
+    `id:\`${DIRECT_ACTION_ID}\`,`,
+    `message:${fileManagerMessageExpression(platform)},`,
+    `icon:${target}?.resolvedIcon??${target}?.icon??${items}[0]?.icon,`,
+    `onSelect:()=>${openTarget}(\`fileManager\`,void 0,void 0,!1)},`,
+    `...${items}]`,
+  ].join("");
+  const edits = [
+    {
+      start: callback.params.at(-1).end,
+      replacement: `,${persist}=!0`,
+    },
+    {
+      start: setData.start,
+      end: setData.end,
+      replacement: `${persist}&&(${source.slice(setData.start, setData.end)})`,
+    },
+    {
+      start: persistProperty.value.start,
+      end: persistProperty.value.end,
+      replacement: `${persist}?${source.slice(
+        persistProperty.value.start,
+        persistProperty.value.end,
+      )}:void 0`,
+    },
+    {
+      start: returnNode.start,
+      end: returnNode.end,
+      replacement,
+    },
+  ].sort((left, right) => right.start - left.start);
+  let next = source;
+  for (const edit of edits) {
+    next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end ?? edit.start);
+  }
+  try {
+    acorn.parse(next, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+    });
+  } catch (error) {
+    return { status: "parse-failed", phase: "after", error, source };
+  }
+  return { status: "patched", source: next };
+}
+
 function selectTargets(bundles) {
   const platforms = [...new Set(bundles.map((bundle) => bundle.platform))];
   return platforms.flatMap((platform) => {
@@ -714,33 +857,73 @@ function selectTargets(bundles) {
 }
 
 function findTargets(platform) {
-  const appInitialTargets = locateBundles({
-    dir: "assets",
-    pattern: /^app-initial-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  })
-    .map((target) => ({
-      ...target,
-      source: fs.readFileSync(target.path, "utf-8"),
-    }));
-  const appPrimaryTargets = locateBundles({
-    dir: "assets",
-    pattern: /^app-primary-.*\.js$/,
-    ...(platform ? { platform } : {}),
-  })
-    .map((target) => ({
-      ...target,
-      source: fs.readFileSync(target.path, "utf-8"),
-    }));
+  const requested = platform ? [platform] : PLATFORMS.filter((item) =>
+    fs.existsSync(path.join(SRC_DIR, item, "_asar", "webview", "assets")));
+  const rspackTargets = [];
+  const legacyPlatforms = [];
+  for (const current of requested) {
+    const assets = path.join(SRC_DIR, current, "_asar", "webview", "assets");
+    if (!isRspackFrontend(assets)) {
+      legacyPlatforms.push(current);
+      continue;
+    }
+    const candidates = findFrontendModules(assets, {
+      all: [
+        "localConversation.openTarget.error",
+        "persistPreferredTargetPath",
+        "onOpenInTarget",
+        "open-workspace-in",
+      ],
+    });
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    if (candidates.length === 0 || ids.size !== 1) {
+      throw new Error(
+        `[${current}] expected one Rspack workspace menu implementation, found ` +
+        `${candidates.length} module(s), ${ids.size} id(s)`,
+      );
+    }
+    rspackTargets.push(...candidates.map((candidate) => ({
+      platform: current,
+      rspack: true,
+      patchKind: "open-menu",
+      ...candidate,
+    })));
+  }
+
+  const appInitialTargets = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-initial-.*\.js$/,
+      })
+        .filter((target) => legacyPlatforms.includes(target.platform))
+        .map((target) => ({
+          ...target,
+          source: fs.readFileSync(target.path, "utf-8"),
+        }))
+    : [];
+  const appPrimaryTargets = legacyPlatforms.length > 0
+    ? locateBundles({
+        dir: "assets",
+        pattern: /^app-primary-.*\.js$/,
+      })
+        .filter((target) => legacyPlatforms.includes(target.platform))
+        .map((target) => ({
+          ...target,
+          source: fs.readFileSync(target.path, "utf-8"),
+        }))
+    : [];
 
   const bundles = [...appInitialTargets, ...appPrimaryTargets];
-  const targets = selectTargets(bundles);
-  return targets.map((target) => ({
+  const targets = [
+    ...rspackTargets,
+    ...selectTargets(bundles).map((target) => ({
     ...target,
     relatedSources: bundles.filter((bundle) =>
       bundle.platform === target.platform && bundle.path !== target.path,
     ),
-  }));
+    })),
+  ];
+  return targets;
 }
 
 function main() {
@@ -758,7 +941,7 @@ function main() {
   for (const current of new Set(targets.map(target => target.platform))) {
     for (const kind of ["open-menu", "sidebar"]) {
       const matches = targets.filter(target => target.platform === current && target.patchKind === kind);
-      if (matches.length > 1) {
+      if (matches.length > 1 && !matches.every(target => target.rspack)) {
         console.error(`  [x] ${current}: ambiguous ${kind} bundles (${matches.length})`);
         process.exitCode = 1;
         return;
@@ -769,11 +952,13 @@ function main() {
   let patched = 0;
   let failed = 0;
   for (const target of targets) {
-    const label = relPath(target.path);
+    const label = relPath(target.rspack ? target.file : target.path);
     // 新版的两个补丁可能落在同一 bundle，必须读取上一阶段写入后的内容。
-    const source = fs.readFileSync(target.path, "utf-8");
+    const source = fs.readFileSync(target.rspack ? target.file : target.path, "utf-8");
     const result =
-      target.patchKind === "sidebar"
+      target.rspack
+        ? patchRspackModuleSource(target)
+        : target.patchKind === "sidebar"
         ? patchSidebarSource(source, target.relatedSources)
         : patchSource(source);
 
@@ -793,7 +978,11 @@ function main() {
           `  [?] ${label}: would expose the file manager action (${target.patchKind})`,
         );
       } else {
-        fs.writeFileSync(target.path, result.source, "utf-8");
+        fs.writeFileSync(
+          target.rspack ? target.file : target.path,
+          target.rspack ? replaceFrontendModule(target, result.source) : result.source,
+          "utf-8",
+        );
         console.log(
           `  [ok] ${label}: file manager action exposed (${target.patchKind})`,
         );
@@ -826,6 +1015,7 @@ module.exports = {
   findTargets,
   hasSidebarMenuSignatures,
   hasNativeDirectAction,
+  patchRspackModuleSource,
   patchSidebarSource,
   patchSource,
   selectTargets,

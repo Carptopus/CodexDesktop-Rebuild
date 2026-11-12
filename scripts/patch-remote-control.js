@@ -15,6 +15,7 @@ const path = require("node:path");
 const { parse } = require("acorn");
 const { literal, walk } = require("./patch-ast-util");
 const { relPath, SRC_DIR } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule, moduleExports } = require("./rspack-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const STORAGE_KEY = "local_remote_control_enabled";
@@ -284,7 +285,7 @@ function validatePatchedSource(source) {
   }
   const disableCalls = descendants(isolated[0].consequent, node => node.type === "CallExpression" &&
     propertyName(node.callee) === "catch" && node.callee.object?.type === "CallExpression" &&
-    node.callee.object.callee.type === "Identifier" && node.callee.object.arguments.length === 2 &&
+    ["Identifier", "SequenceExpression"].includes(node.callee.object.callee.type) && node.callee.object.arguments.length === 2 &&
     node.callee.object.arguments[0].type === "Identifier" &&
     source.slice(node.callee.object.arguments[1].start, node.callee.object.arguments[1].end) === "!1");
   if (disableCalls.length !== 1) throw new Error("Remote Control 非 ChatGPT 未强制同步 disable");
@@ -431,6 +432,73 @@ function targetDirectories(platform) {
   })).filter((item) => fs.existsSync(item.path));
 }
 
+function patchRspackSource(source, { requireName, authId, authExport }) {
+  if (source.includes(MARKER)) {
+    validatePatchedSource(source);
+    return { status: "already-patched", source };
+  }
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" }), all = functions(ast);
+  const sync = all.filter(fn => source.slice(fn.start, fn.end).includes("Failed to sync local remote control enablement"));
+  const bridges = all.filter(fn => source.slice(fn.start, fn.end).includes("remote-connections/gate-bridge"));
+  if (sync.length !== 1 || bridges.length !== 1) throw new Error("Rspack Remote Control 组件不唯一");
+  const text = node => source.slice(node.start, node.end);
+  const callable = node => `(${text(node)})`;
+  const fn = sync[0], gate = bridges[0];
+  const catches = descendants(fn, node => node.type === "CallExpression" && propertyName(node.callee) === "catch");
+  const call = catches.length === 1 ? catches[0].callee.object : null;
+  const declarations = descendants(fn, node => node.type === "VariableDeclarator");
+  const state = declarations.find(node => node.id.name === call?.arguments?.[1]?.name);
+  const container = declarations.find(node => node.id.name === call?.arguments?.[0]?.name);
+  if (state?.init?.type !== "CallExpression" || !container?.init || call.arguments.length !== 2) throw new Error("Rspack Remote Control catalog 读取漂移");
+  const effects = descendants(fn, node => node.type === "CallExpression" && propertyName(memberCallee(node)) === "useEffect");
+  if (effects.length !== 1) throw new Error("Rspack Remote Control effect 不唯一");
+  const readAuth = `${callable(state.init.callee)}(__codexRemoteAuth.${authExport})`;
+  const account = `__codexRemoteAccount=${readAuth}`;
+  const replacement = `function ${fn.id.name}(){let ${container.id.name}=${text(container.init)},${state.id.name}=${text(state.init)},${account};${callable(effects[0].callee)}(()=>{if(__codexRemoteAccount?.authLoading)return;if(__codexRemoteAccount?.authMethod!==\`chatgpt\`){${callable(call.callee)}(${container.id.name},!1).catch(${text(catches[0].arguments[0])});return}${state.id.name}!=null&&${callable(call.callee)}(${container.id.name},${state.id.name}).catch(${text(catches[0].arguments[0])})},[${container.id.name},${state.id.name},__codexRemoteAccount?.authLoading,__codexRemoteAccount?.authMethod]);return null}${MARKER}${CATALOG_MARKER}`;
+  const gateState = descendants(gate, node => node.type === "VariableDeclarator" && node.id.type === "ObjectPattern"
+    && node.id.properties.some(p => p.key.name === "checkGate"));
+  if (gateState.length !== 1) throw new Error("Rspack Remote Control gate hook 不唯一");
+  const binding = name => gateState[0].id.properties.find(p => p.key.name === name)?.value.name;
+  const checker = binding("checkGate"), loading = binding("isLoading");
+  const gateCalls = descendants(gate, node => node.type === "CallExpression" && node.callee.name === checker);
+  const oneToOne = gateCalls.find(node => node.arguments[0]?.type === "MemberExpression");
+  const remote = gateCalls.find(node => literal(node.arguments[0]) === "1042620455");
+  const service = descendants(gate, node => node.type === "VariableDeclarator" && propertyName(node.init) === "remoteConnections");
+  const gateCatches = descendants(gate, node => node.type === "CallExpression" && propertyName(node.callee) === "catch");
+  const gateEffects = descendants(gate, node => node.type === "CallExpression" && propertyName(memberCallee(node)) === "useEffect");
+  if (!oneToOne || !remote || !loading || service.length !== 1 || gateCatches.length !== 1 || gateEffects.length !== 1) throw new Error("Rspack Remote Control native bridge 漂移");
+  const enabled = gateCatches[0].callee.object.arguments[0]?.properties?.find(p => p.key.name === "enabled")?.value;
+  if (enabled?.type !== "Identifier") throw new Error("Rspack Remote Control enabled binding 漂移");
+  const gateReplacement = `function ${gate.id.name}(){let{checkGate:${checker},isLoading:${loading}}=${text(gateState[0].init)},__codexRemoteGateAccount=${readAuth},__codexOne=__codexRemoteGateAccount?.authMethod===\`chatgpt\`&&${text(oneToOne)},__codexEnabled=__codexRemoteGateAccount?.authMethod===\`chatgpt\`&&(${text(remote)}||__codexOne),${enabled.name}=__codexEnabled;${callable(gateEffects[0].callee)}(()=>{if(${loading}||__codexRemoteGateAccount?.authLoading)return;let __codexService=${text(service[0].init)};__codexService?.setRemoteControlEnabled({enabled:__codexEnabled,oneToOnePairingInAppEnabled:__codexOne}).catch(${text(gateCatches[0].arguments[0])})},[${loading},__codexOne,__codexEnabled,__codexRemoteGateAccount?.authLoading,__codexRemoteGateAccount?.authMethod]);return null}${GATE_MARKER}`;
+  let next = source;
+  for (const edit of [{ start: fn.start, end: fn.end, replacement }, { start: gate.start, end: gate.end, replacement: gateReplacement }].sort((a,b)=>b.start-a.start)) {
+    next = next.slice(0,edit.start) + edit.replacement + next.slice(edit.end);
+  }
+  next = `var __codexRemoteAuth=${requireName}(${JSON.stringify(authId)});` + next;
+  parse(next, { ecmaVersion: "latest", sourceType: "module" });
+  patchRspackSource(next, { requireName, authId, authExport });
+  return { status: "patched", source: next };
+}
+
+function patchRspack(directory, check) {
+  const accounts = findFrontendModules(directory, { all: ["authenticatedAccountId", "authLoading", "supportedSurface", "hasChatGptToken"],
+    test: source => /accountId:null,accountLoading:!0,/.test(source) });
+  if (!accounts.length || new Set(accounts.map(target => target.id)).size !== 1) throw new Error("Rspack 当前账户 atom 模块不唯一");
+  const auth = accounts[0];
+  const authAst = parse(auth.source, { ecmaVersion: "latest", sourceType: "module" });
+  const atoms = descendants(authAst, node => node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init?.type === "CallExpression"
+    && ["accountLoading", "authLoading", "requiresAuth", "supportedSurface"].every(term => auth.source.slice(node.init.start,node.init.end).includes(term)));
+  if (atoms.length !== 1) throw new Error("Rspack 当前账户 atom 初始化不唯一");
+  const exported = moduleExports(auth).filter(item => item.value === atoms[0].id.name);
+  if (exported.length !== 1) throw new Error("Rspack 当前账户 atom 导出不唯一");
+  const targets = findFrontendModules(directory, { all: ["Failed to sync local remote control enablement", "remote-connections/gate-bridge"] });
+  if (!targets.length || new Set(targets.map(target => target.id)).size !== 1) throw new Error("Rspack Remote Control 模块不唯一");
+  const plans = targets.map(target => ({ target, result: patchRspackSource(target.source,
+    { requireName: target.requireName, authId: auth.id, authExport: exported[0].exported }) }));
+  for (const { target, result } of plans) if (!check && result.status === "patched") fs.writeFileSync(target.file, replaceFrontendModule(target, result.source), "utf8");
+  console.log(`  [ok] Rspack Remote Control 账户隔离已核对${check ? "；dry-run" : ""}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find((arg) => PLATFORMS.includes(arg));
@@ -441,6 +509,7 @@ function main() {
 
   for (const directory of directories) {
     try {
+      if (isRspackFrontend(directory.path)) { patchRspack(directory.path, check); continue; }
       const results = fs.readdirSync(directory.path)
         .filter((name) => name.endsWith(".js"))
         .map((name) => ({ name, path: path.join(directory.path, name) }))
@@ -474,4 +543,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { MARKER, patchSource, validatePatchedSource };
+module.exports = { MARKER, patchSource, validatePatchedSource, patchRspackSource };

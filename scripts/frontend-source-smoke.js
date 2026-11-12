@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
 const { parse } = require("acorn");
+const { isRspackFrontend } = require("./rspack-util");
 function walk(node, visit) {
   if (!node || typeof node !== "object") return;
   if (node.type) visit(node);
@@ -14,6 +15,9 @@ function walk(node, visit) {
   }
 }
 function verifyFrontendSource(assets) {
+  if (isRspackFrontend(assets)) {
+    return require("./frontend-rspack-smoke").verifyRspackFrontend(assets);
+  }
   const files = fs.readdirSync(assets).filter(name => name.endsWith(".js"));
   const markers = ["const __codexQuotaThreadProvider=", "codex-rebuild-local-accent-presets:theme",
     "Codex：API-key 首页使用官方记录器。", "CodexRebuildThreadTimeline", "CodexRebuildMcpStatusRefresh",
@@ -198,5 +202,12 @@ function verifyFrontendSource(assets) {
   assert.match(dialogs, /codex-rebuild-dialog-editor h-\[720px\] max-w-full max-h-full/);
   return { passed: true, quotaScenarios: results, apiKeyHomeNavigation: true, threadTimelineEnabled: true, mcpStatusRefreshGoverned: true, remoteControlAuthIsolated: true, apiKeyServiceTiers: true, nativeAppearanceRow: true, nativeAccentThemePipeline: true, dialogHeightPreserved: true };
 }
-if (require.main === module) console.log(JSON.stringify(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")), null, 2));
+if (require.main === module) {
+  Promise.resolve(verifyFrontendSource(path.resolve(process.argv[2] || "src/win/_asar/webview/assets")))
+    .then(result => console.log(JSON.stringify(result, null, 2)))
+    .catch(error => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+}
 module.exports = { verifyFrontendSource };

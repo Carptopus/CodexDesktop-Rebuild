@@ -5,6 +5,8 @@ const path = require("node:path");
 const { parse } = require("acorn");
 const { applyEdits, key, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule, moduleImports,
+  findModuleCopies, moduleExports } = require("./rspack-util");
 const MODULE = "codex-rebuild-sidebar-usage.js";
 const MARKER = "/* CodexRebuildSidebarUsage */";
 const RAIL_MARKER = "/* CodexRebuildSidebarUsageRail */";
@@ -31,6 +33,52 @@ function findSidebarTarget(directory) {
   return unique(candidates, "原生头像侧栏资源");
 }
 
+function findRspackSidebarTarget(directory) {
+  const target = unique(findFrontendModules(directory, {
+    all: ["codex.profileFooter.settingsFallback", "codex.profileFooter.loadingProfile", "sidebarFooter", "hideUsage"],
+    test: isSidebarSignature,
+  }), "头像侧栏模块");
+  const ast = parse(target.source, { ecmaVersion: "latest" });
+  const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
+    contains(target.source, node, "codex.profileFooter.settingsFallback")), "头像函数");
+  const subscription = unique(nodes(footer, node => node.type === "CallExpression" &&
+    node.arguments.length === 2 && node.arguments[0]?.type === "ConditionalExpression" &&
+    literal(node.arguments[0].consequent) === null && node.arguments[0].alternate.type === "MemberExpression" &&
+    node.arguments[1]?.type === "Identifier"), "头像原生额度订阅");
+  const nativeReference = subscription.arguments[0].alternate;
+  const nativeImport = unique(moduleImports(target).filter(item => item.local === nativeReference.object.name), "原生额度依赖");
+  const native = unique(findModuleCopies(directory, nativeImport.id), "原生额度派生模块");
+  const nativeExport = unique(moduleExports(native).filter(item => item.exported === key(nativeReference.property)), "原生额度导出");
+  const nativeAst = parse(native.source, { ecmaVersion: "latest" });
+  const derived = unique(nativeAst.body.flatMap(node => node.type === "VariableDeclaration" ? node.declarations : [])
+    .filter(node => node.id.name === nativeExport.value), "原生额度派生 Atom");
+  if (!contains(native.source, derived, "ambient_usage") || !contains(native.source, derived, "authMethod")) {
+    throw new Error("原生额度身份过滤与展示数据结构未知");
+  }
+  const imports = moduleImports(native);
+  const queryRead = unique(nodes(derived, node => node.type === "VariableDeclarator" && node.id.type === "ObjectPattern" &&
+    props(node.id).data && node.init?.type === "CallExpression" && node.init.callee.type === "Identifier" &&
+    node.init.arguments.length === 1 && node.init.arguments[0]?.type === "MemberExpression" &&
+    imports.some(item => item.local === node.init.arguments[0].object.name)), "原生额度共享查询读取");
+  const queryReference = queryRead.init.arguments[0];
+  const queryImport = unique(imports.filter(item => item.local === queryReference.object.name), "共享额度查询依赖");
+  const queryModule = unique(findModuleCopies(directory, queryImport.id), "共享额度查询模块");
+  const queryExport = unique(moduleExports(queryModule).filter(item => item.exported === key(queryReference.property)), "共享额度查询导出");
+  const queryAst = parse(queryModule.source, { ecmaVersion: "latest" });
+  const query = unique(queryAst.body.flatMap(node => node.type === "VariableDeclaration" ? node.declarations : [])
+    .filter(node => node.id.name === queryExport.value), "共享额度查询 Atom");
+  const options = unique(nodes(query.init, node => node.type === "CallExpression" && node.callee.type === "Identifier" &&
+    node.arguments.length === 1 && literal(node.arguments[0]) === "automatic"), "自动额度查询选项");
+  const factory = unique(queryAst.body.filter(node => node.type === "FunctionDeclaration" && node.id.name === options.callee.name), "自动额度选项工厂");
+  const fetch = unique(queryAst.body.filter(node => node.type === "FunctionDeclaration" &&
+    nodes(node, child => literal(child) === "/wham/usage").length), "官方额度请求");
+  if (!contains(queryModule.source, factory, "queryFn") || !contains(queryModule.source, factory, "refetchInterval") ||
+      !nodes(factory, node => node.type === "CallExpression" && node.callee.name === fetch.id.name).length) {
+    throw new Error("原生自动查询与官方额度请求关系未知");
+  }
+  return { ...target, usageAtomExpression: `${target.requireName}(${JSON.stringify(queryImport.id)})[${JSON.stringify(queryExport.exported)}]` };
+}
+
 function usageAssignments(ast, fetchName) {
   const isQuery = argument => nodes(argument, node => node.type === "ObjectExpression" &&
     props(node).refetchInterval && props(node).queryFn && nodes(props(node).queryFn, call =>
@@ -49,16 +97,16 @@ function usageAssignments(ast, fetchName) {
     }));
 }
 
-function analyze(source, ast, relatedSources = []) {
+function analyze(source, ast, relatedSources = [], rspack) {
   const footer = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
     contains(source, node, "codex.profileFooter.settingsFallback") &&
     contains(source, node, "codex.profileFooter.loadingProfile")), "原生头像侧栏组件");
   const declarations = nodes(footer, node => node.type === "VariableDeclarator", { ownScope: true });
   const hookFor = name => {
     const declaration = unique(declarations.filter(node => node.id?.name === name), `侧栏变量 ${name}`);
-    if (declaration.init?.type !== "CallExpression" || declaration.init.callee.type !== "Identifier" ||
+    if (declaration.init?.type !== "CallExpression" || !["Identifier", "SequenceExpression"].includes(declaration.init.callee.type) ||
         declaration.init.arguments.length !== 0) throw new Error(`侧栏 Hook ${name} 结构未知`);
-    return declaration.init.callee.name;
+    return declaration.init.callee.type === "Identifier" ? declaration.init.callee.name : `(${source.slice(declaration.init.callee.start, declaration.init.callee.end)})`;
   };
   const authBinding = unique(declarations.filter(node => node.id.type === "ObjectPattern" &&
     ["accountId", "authMethod", "userId"].every(name => props(node.id)[name])), "账户身份解构");
@@ -74,10 +122,10 @@ function analyze(source, ast, relatedSources = []) {
     throw new Error("侧栏宽度和额度可见性结构未知");
   }
   const widthRead = unique(declarations.filter(node => node.id?.name === width.alternate.name), "侧栏宽度读取");
-  if (widthRead.init?.type !== "CallExpression" || widthRead.init.callee.type !== "Identifier") {
+  if (widthRead.init?.type !== "CallExpression" || !["Identifier", "SequenceExpression"].includes(widthRead.init.callee.type)) {
     throw new Error("原生状态订阅读取结构未知");
   }
-  const readHook = widthRead.init.callee.name;
+  const readHook = widthRead.init.callee.type === "Identifier" ? widthRead.init.callee.name : `(${source.slice(widthRead.init.callee.start, widthRead.init.callee.end)})`;
   const intlCall = unique(nodes(footer, node => node.type === "CallExpression" &&
     node.callee.type === "MemberExpression" && key(node.callee.property) === "formatMessage" &&
     node.arguments[0]?.type === "ObjectExpression" &&
@@ -90,7 +138,11 @@ function analyze(source, ast, relatedSources = []) {
   let usageAtom, initialize;
   const usageFetch = ast.body.filter(node => node.type === "FunctionDeclaration" &&
     nodes(node, child => literal(child) === "/wham/usage").length > 0);
-  if (usageFetch.length) {
+  if (rspack) {
+    if (!rspack.usageAtomExpression) throw new Error("缺少经原生消费链核验的共享额度 Atom");
+    usageAtom = { left: { name: rspack.usageAtomExpression } };
+    initialize = { id: { name: null } };
+  } else if (usageFetch.length) {
     const fetch = unique(usageFetch, "官方额度请求");
     usageAtom = unique(usageAssignments(ast, fetch.id.name), "共享额度查询");
     initialize = unique(ast.body.filter(node => node.type === "FunctionDeclaration" &&
@@ -172,7 +224,7 @@ function patchRail(source, footerName) {
   ]);
 }
 
-function patchSource(source, { relatedSources = [] } = {}) {
+function patchSource(source, { relatedSources = [], rspack } = {}) {
   if (!source.includes("codex.profileFooter.settingsFallback")) return { status: "not-applicable", source };
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -190,10 +242,10 @@ function patchSource(source, { relatedSources = [] } = {}) {
     if ([COMPONENT, ACCOUNT_COMPONENT, RENDER, MODULE].some(value => source.includes(value))) {
       throw new Error("侧栏额度注入名称已占用");
     }
-    const shape = analyze(source, ast, relatedSources);
+    const shape = analyze(source, ast, relatedSources, rspack);
     const call = `(0,${shape.jsx}.jsx)(${COMPONENT},{fallback:${shape.avatarSlot.init.name},compact:${shape.compact},hidden:${shape.hidden}})`;
     const bridges = `\n${MARKER}\nfunction ${COMPONENT}(props){const auth=${shape.authHook}();return props.hidden||auth.authMethod!==\`chatgpt\`?props.fallback:(0,${shape.jsx}.jsx)(${ACCOUNT_COMPONENT},props);}\n`
-      + `function ${ACCOUNT_COMPONENT}(props){${shape.initialize}();const auth=${shape.authHook}(),usage=${shape.readHook}(${shape.usageAtom}),intl=${shape.intlHook}();return ${RENDER}({...props,auth,usage:usage.data,intl,jsx:${shape.jsx}});}\n`;
+      + `function ${ACCOUNT_COMPONENT}(props){${shape.initialize ? `${shape.initialize}();` : ""}const auth=${shape.authHook}(),usage=${shape.readHook}(${shape.usageAtom}),intl=${shape.intlHook}();return ${RENDER}({...props,auth,usage:usage.data,intl,jsx:${shape.jsx}});}\n`;
     const patched = applyEdits(source, [{ start: shape.avatarSlot.init.start, end: shape.avatarSlot.init.end, text: call }]);
     const result = patchRail(`import {renderSidebarUsage as ${RENDER}} from "./${MODULE}";\n` + patched + bridges,
       shape.footer.id.name);
@@ -211,6 +263,22 @@ function main() {
   for (const name of platform ? [platform] : ["win", "mac-arm64", "mac-x64"]) {
     const directory = path.join(SRC_DIR, name, "_asar", "webview", "assets");
     if (!platform && !fs.existsSync(directory)) continue;
+    if (isRspackFrontend(directory)) {
+      const targetFile = findRspackSidebarTarget(directory);
+      // 与账户菜单订阅完全相同的自动查询 Atom，沿用原生推送、账户隔离与刷新。
+      const result = patchSource(targetFile.source, {rspack:targetFile});
+      if (!["patched", "already-patched"].includes(result.status)) throw new Error(result.reason ?? result.status);
+      const importLine = 'import {renderSidebarUsage as '+RENDER+'} from "./'+MODULE+'";';
+      const body = result.source.replace(importLine, '/* '+MODULE+' */');
+      const chunk = replaceFrontendModule(targetFile, body, [importLine.replace('./'+MODULE,'../'+MODULE)]);
+      if (!check) {
+        fs.writeFileSync(targetFile.file, chunk);
+        fs.copyFileSync(path.join(__dirname, "runtime", "sidebar-usage.mjs"), path.join(directory, MODULE));
+      }
+      console.log(`[ok] Rspack 头像额度与共享查询${check ? "结构检查通过" : "已应用"}`);
+      count++;
+      continue;
+    }
     const targetFile = findSidebarTarget(directory);
     const target = targetFile.path;
     let relatedSources = [];
@@ -230,4 +298,4 @@ function main() {
   if (!count) throw new Error("缺少侧栏额度目标资源");
 }
 if (require.main === module) main();
-module.exports = { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, isSidebarSignature, patchSource };
+module.exports = { MODULE, MARKER, COMPONENT, ACCOUNT_COMPONENT, RENDER, findSidebarTarget, findRspackSidebarTarget, isSidebarSignature, patchSource };

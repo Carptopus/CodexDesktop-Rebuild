@@ -10,6 +10,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
+const { frontendFiles } = require("./rspack-util");
 const { relPath, SRC_DIR } = require("./patch-util");
 
 const MARKER = "/* CodexRebuildThreadTimeline */";
@@ -150,9 +151,8 @@ function main() {
 
   for (const directory of directories) {
     try {
-      const results = fs.readdirSync(directory.path)
-        .filter((name) => /^app-initial-.*\.js$/.test(name))
-        .map((name) => ({ name, path: path.join(directory.path, name) }))
+      const results = frontendFiles(directory.path)
+        .map(file => ({ name: path.basename(file), path: file }))
         .map((file) => ({ ...file, source: fs.readFileSync(file.path, "utf8") }))
         .map((file) => ({ file, result: patchSource(file.source) }))
         .filter((item) => item.result.status !== "not-applicable");

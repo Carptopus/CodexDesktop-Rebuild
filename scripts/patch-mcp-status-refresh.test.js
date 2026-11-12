@@ -2,6 +2,33 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { MARKER, REFRESH_DELAY_MS, patchSource } = require("./patch-mcp-status-refresh");
+const { patchRspackSource } = require("./patch-mcp-status-refresh");
+
+test("Rspack 全局与 thread 通知共用250ms窗口，保留 inventory 累计和 thread 范围刷新", () => {
+  const source = 'function createHandler(e,t,C){let nH=!0,nF,nG,n9=new Set,n8=!1,n7=n=>{(0,nn.q)(e.queryClient,{queryKey:t0.qw,predicate:({queryKey:e})=>("installed-inventory"===e[1]||"installed"===e[1]&&n)&&e[2]===t},{cancelRefetch:!1})};return n=>{switch(n.method){case"mcpServer/startupStatus/updated":"ready"===n.params.status&&null!=n.params.threadId?(n8=n8||plugin(n.params.name),null==nF&&(nF=setTimeout(()=>{nF=void 0;let n=n8;n8=!1,nH&&(C?.()??!0)&&(n7(n),(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t,"mention-discovery"],refetchType:"active"},{cancelRefetch:!1}))},0))):"ready"===n.params.status&&n7(plugin(n.params.name)),null==n.params.threadId&&"starting"!==n.params.status?(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t]},{cancelRefetch:!1}):null!=n.params.threadId&&"starting"!==n.params.status&&(n9.add(n.params.threadId),null==nG&&(nG=setTimeout(()=>{nG=void 0;let n=n9;n9=new Set,nH&&(C?.()??!0)&&e.queryClient.invalidateQueries({queryKey:[...t1.ey,t,"thread"],predicate:({queryKey:e})=>{let t=e[t1.ey.length+2];return"string"==typeof t&&n.has(t)}})},0)));break}}}';
+  const result = patchRspackSource(source), calls = [], timers = [];
+  const factory = Function("nn", "t0", "t1", "plugin", "setTimeout", `${result.source};return createHandler`)(
+    { q: (client, filters) => calls.push(filters) }, { qw: ["plugins"] }, { ey: ["mcp"] }, name => name === "plugin",
+    (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; });
+  const listener = factory({ queryClient: { invalidateQueries: filters => calls.push(filters) } }, "local", () => true);
+  for (const params of [{ name: "plugin", threadId: "thread-a", status: "ready" }, { name: "server", threadId: null, status: "ready" }]) {
+    listener({ method: "mcpServer/startupStatus/updated", params });
+  }
+  assert.equal(timers.filter(timer => timer.delay === 250).length, 1);
+  assert.equal(timers.filter(timer => timer.delay === 0).length, 1);
+  timers.find(timer => timer.delay === 250).callback();
+  assert.equal(calls.filter(filters => filters.queryKey.at(-1) === "toolsAndAuthOnly").length, 1);
+  const full = calls.find(filters => filters.refetchType === "none");
+  assert.equal(full.predicate({ queryKey: ["mcp", "local", "full"] }), true);
+  assert.equal(full.predicate({ queryKey: ["mcp", "local", "thread"] }), false);
+  const inventory = calls.filter(filters => filters.queryKey[0] === "plugins").at(-1);
+  assert.equal(inventory.predicate({ queryKey: ["plugins", "installed", "local"] }), true);
+  timers.find(timer => timer.delay === 0).callback();
+  const threads = calls.find(filters => filters.queryKey.at(-1) === "thread");
+  assert.equal(threads.predicate({ queryKey: ["mcp", "local", "thread", "thread-a"] }), true);
+  assert.equal(threads.predicate({ queryKey: ["mcp", "local", "thread", "thread-b"] }), false);
+  assert.equal(patchRspackSource(result.source).status, "already-patched");
+});
 
 function fixture() {
   return "function createHandler(e,t,r){let i=!0,C,S=new Set,x;return n=>{switch(n.method){case`mcpServer/startupStatus/updated`:n.params.status===`ready`&&n.params.threadId!=null?C??=setTimeout(()=>{C=void 0,i&&(r?.()??!0)&&(GE(e.queryClient,{queryKey:[...eC,t,`toolsAndAuthOnly`],exact:!0},{cancelRefetch:!1}),GE(e.queryClient,{queryKey:[...eC,t,`mention-discovery`],refetchType:`active`},{cancelRefetch:!1}))},0):n.params.status===`ready`&&GE(e.queryClient,{queryKey:WT,predicate:({queryKey:e})=>(e[1]===`installed-inventory`||e[1]===`installed`&&K_(n.params.name))&&e[2]===t},{cancelRefetch:!1}),n.params.threadId==null&&n.params.status!==`starting`?GE(e.queryClient,{queryKey:[...eC,t]},{cancelRefetch:!1}):n.params.threadId!=null&&n.params.status!==`starting`&&(S.add(n.params.threadId),x??=setTimeout(()=>{x=void 0;let n=S;S=new Set,i&&(r?.()??!0)&&e.queryClient.invalidateQueries({queryKey:[...eC,t,`thread`],predicate:({queryKey:e})=>{let t=e[eC.length+2];return typeof t==`string`&&n.has(t)}})},0));break;default:break}}}";

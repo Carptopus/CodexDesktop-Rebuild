@@ -6,6 +6,8 @@ const { parse } = require("acorn");
 const { applyEdits, key, literal, nodes } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
+const { frontendFiles, rspackModules } = require("./rspack-util");
+
 const MARKER = "/* codex-rebuild-hide-invite-menu */";
 const LABEL_IDS = [
   "codex.profileDropdown.inviteFriend",
@@ -13,6 +15,13 @@ const LABEL_IDS = [
 ];
 
 function patchSource(source) {
+  if (!LABEL_IDS.every(id=>source.includes(id)) || source.slice(0,220).includes("exports=JSON.parse(")) return {status:"not-applicable",source};
+  if (source.includes("export const __webpack_modules__=")) {
+    const targets = rspackModules(source).filter(item => LABEL_IDS.every(id => item.source.includes(id)));
+    if (targets.length !== 1) return { status: "unexpected-component-count", source };
+    const target = targets[0], result = patchSource(target.source);
+    return { ...result, source: source.slice(0, target.start) + result.source + source.slice(target.end) };
+  }
   if (!LABEL_IDS.every(id => source.includes(id))) return { status: "not-applicable", source };
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
   const components = ast.body.filter(node => node.type === "FunctionDeclaration" &&
@@ -46,11 +55,11 @@ function main() {
     const directory = path.join(SRC_DIR, name, "_asar", "webview", "assets");
     if (!platform && !fs.existsSync(directory)) continue;
     const files = fs.existsSync(directory)
-      ? fs.readdirSync(directory).filter(file => /^profile-dropdown-items-.*\.js$/.test(file)) : [];
+      ? frontendFiles(directory).filter(file => { const source = fs.readFileSync(file, "utf8"); return ["patched", "already-patched"].includes(patchSource(source).status); }) : [];
     if (files.length !== 1) {
       throw new Error(`[${name}] 邀请菜单资源必须唯一`);
     }
-    targets.push({ path: path.join(directory, files[0]) });
+    targets.push({ path: files[0] });
   }
   if (!targets.length) throw new Error("缺少邀请菜单目标资源，不能跳过补丁");
   for (const target of targets) {

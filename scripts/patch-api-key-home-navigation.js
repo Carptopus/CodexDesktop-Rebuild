@@ -15,6 +15,7 @@ const path = require("node:path");
 const { parse } = require("acorn");
 const { applyEdits, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
 
 const MARKER = "/* Codex：API-key 首页使用官方记录器。 */";
 const BROKEN_TRACKER_MARKER = "/* Codex：API-key 首页记录真实会话。 */";
@@ -197,7 +198,7 @@ function findCurrentHomeCheck(fn, current, area, source) {
 
 function findHomeRestore(ast, source) {
   const candidates = [];
-  for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
+  for (const fn of nodes(ast, node => ["FunctionDeclaration", "FunctionExpression"].includes(node.type))) {
     if (fn.params.length < 2 || fn.params[0]?.type !== "Identifier" ||
       fn.params[1]?.type !== "ObjectPattern") continue;
     const store = fn.params[0].name;
@@ -223,7 +224,16 @@ function findHomeRestore(ast, source) {
         node => equalityWithIdentifier(node, bindings.productMode)?.type === "CallExpression");
       if (productChecks.length !== 1) continue;
 
-      const gate = firstAndOperand(branch.test);
+      const operands = logicalOperands(branch.test, "&&");
+      const gate = operands.find(operand => {
+        const name = operand.type === "Identifier" ? operand.name :
+          operand.type === "LogicalExpression" && operand.operator === "||" ? operand.left?.name : null;
+        return name &&
+        fn.body.body.filter(node => node.type === "VariableDeclaration")
+          .flatMap(node => node.declarations).some(node => node.id.name === name &&
+            memberName(node.init?.callee) === "get" && memberRoot(node.init.callee) === store);
+      })
+        ?? firstAndOperand(branch.test);
       const capability = gate?.type === "Identifier" ? gate.name :
         gate?.type === "LogicalExpression" && gate.operator === "||" &&
         gate.left?.type === "Identifier" ? gate.left.name : null;
@@ -306,7 +316,7 @@ function findActiveDestinationTracker(ast, source) {
   for (const fn of ast.body.filter(node => node.type === "FunctionDeclaration")) {
     const all = nodes(fn, () => true);
     const calls = all.filter(node => node.type === "CallExpression" &&
-      node.callee?.type === "Identifier" &&
+      ["Identifier", "SequenceExpression"].includes(node.callee?.type) &&
       node.arguments.length === 2 && node.arguments[0]?.type === "Identifier" &&
       node.arguments[1]?.type === "ObjectExpression");
     // 已补丁的回调会多一个 API-key 调用；以官方包含 destinationId 的调用为锚点。
@@ -338,7 +348,7 @@ function findActiveDestinationTracker(ast, source) {
     const sharedAuth = usesSharedAuth(callback, auth) ||
       nodes(callback.body, node => node.type === "Identifier" && node.name === properties.auth.name).length > 0;
     const details = { authMethod: auth.authMethod, callback,
-      recorder: call.callee.name, auth: properties.auth.name, productMode: properties.productMode.name,
+      recorder: call.callee.type === "Identifier" ? call.callee.name : `(${source.slice(call.callee.start, call.callee.end)})`, auth: properties.auth.name, productMode: properties.productMode.name,
       destinationId: properties.destinationId.name, location: properties.location.name,
       store: call.arguments[0].name, alreadyPatched: marker };
     if (!marker && !sharedAuth) continue;
@@ -482,6 +492,55 @@ function targetDirectories(platform) {
   return directories;
 }
 
+function patchRspackNavigation(source, role) {
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  if (role === "tracker") {
+    const tracker = findActiveDestinationTracker(ast, source);
+    if (!tracker) throw new Error("Rspack 首页活动目标跟踪器缺失");
+    if (tracker.alreadyPatched) return { status: "already-patched", source };
+    const next = applyEdits(source, [{ start: tracker.callback.body.start + 1,
+      end: tracker.callback.body.start + 1, replacement: activeDestinationStatement(tracker) }]);
+    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+    if (!findActiveDestinationTracker(parse(next, { ecmaVersion: "latest", sourceType: "module" }), next)?.alreadyPatched) {
+      throw new Error("Rspack 首页记录器应用后验证失败");
+    }
+    return { status: "patched", source: next };
+  }
+  const restore = findHomeRestore(ast, source);
+  if (!restore) throw new Error("Rspack 公共首页恢复函数缺失");
+  const home = restore.currentHome;
+  const markers = [HOME_CURRENT_MARKER, HOME_STATE_MARKER, HOME_RESTORE_MARKER];
+  if (markers.every(marker => source.includes(marker))) {
+    if (!isApiKeyHomeGate(restore.gate, restore.capability, restore.accountKey, restore.area)
+      || !home.markerPresent || !isApiKeyRestoreOverride(restore.preparedRestore.node)) throw new Error("首页恢复补丁结构异常");
+    return { status: "already-patched", source };
+  }
+  if (markers.some(marker => source.includes(marker))) throw new Error("首页恢复补丁标记不完整");
+  const override = marker => `(${restore.capability}||${marker}${restore.accountKey}===\`auth:apikey\`&&${restore.area}===\`home\`)`;
+  const next = applyEdits(source, [
+    { start: restore.gate.start, end: restore.gate.end, replacement: override(HOME_CURRENT_MARKER) },
+    { start: home.node.start, end: home.node.end,
+      replacement: `(${source.slice(home.home.start, home.home.end)}||${HOME_STATE_MARKER}${restore.current}.state?.sidebarThreadLocationId!=null)` },
+    { start: restore.preparedRestore.node.start, end: restore.preparedRestore.node.end, replacement: override(HOME_RESTORE_MARKER) },
+  ]);
+  patchRspackNavigation(next, role);
+  return { status: "patched", source: next };
+}
+
+function patchRspack(directory, check) {
+  const plans = [];
+  for (const [role, all] of [["tracker", ["activeDestinationId", "destinationId:", "accountId", "authMethod"]],
+    ["restore", ["accountKey", "departedAt", "prepareNavigation", "sidebarThreadLocationId"]]]) {
+    const targets = findFrontendModules(directory, { all,
+      test: source => role === "tracker" ? findActiveDestinationTracker(parse(source, { ecmaVersion: "latest", sourceType: "module" }), source) != null
+        : findHomeRestore(parse(source, { ecmaVersion: "latest", sourceType: "module" }), source) != null });
+    if (!targets.length || new Set(targets.map(target => target.id)).size !== 1) throw new Error(`首页 ${role} 模块不唯一`);
+    for (const target of targets) plans.push({ target, result: patchRspackNavigation(target.source, role) });
+  }
+  for (const { target, result } of plans) if (!check && result.status === "patched") fs.writeFileSync(target.file, replaceFrontendModule(target, result.source), "utf8");
+  console.log(`  [ok] Rspack 首页记录与恢复 ${plans.length} 个模块已核对${check ? "；dry-run" : ""}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const platform = args.find(arg => PLATFORMS.includes(arg));
@@ -491,6 +550,7 @@ function main() {
   let patched = 0;
   for (const directory of directories) {
     try {
+      if (isRspackFrontend(directory.path)) { patchRspack(directory.path, check); continue; }
       const results = fs.readdirSync(directory.path).filter(name => name.endsWith(".js"))
         .map(name => ({ name, path: path.join(directory.path, name) }))
         .map(file => ({ ...file, source: fs.readFileSync(file.path, "utf8") }))
@@ -532,4 +592,5 @@ module.exports = {
   LEGACY_MARKERS,
   MARKER,
   patchSource,
+  patchRspackNavigation,
 };

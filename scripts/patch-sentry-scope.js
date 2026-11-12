@@ -94,18 +94,39 @@ function inspectNativeScopeProtection(sources) {
     walk(module.node, (node) => {
       if (node.type !== "ObjectExpression" || !node.properties.some((p) => p.key?.name === "dsn")) return;
       const before = node.properties.find((p) => p.key?.name === "beforeBreadcrumb")?.value;
-      if (before?.type !== "MemberExpression") return;
-      const target = modules.get(imports.get(before.object.name));
+      if (!before) return;
+      const sanitizers = [];
+      const addSanitizer = (member) => {
+        if (member?.type !== "MemberExpression" || member.computed || member.object?.type !== "Identifier" ||
+            member.property?.type !== "Identifier" || !imports.has(member.object.name)) return;
+        sanitizers.push({
+          moduleId: imports.get(member.object.name),
+          property: member.property.name,
+        });
+      };
+      if (before.type === "MemberExpression") addSanitizer(before);
+      else {
+        walk(before, (call) => {
+          if (call.type !== "CallExpression") return;
+          let callee = call.callee;
+          while (callee?.type === "SequenceExpression") callee = callee.expressions[callee.expressions.length - 1];
+          if (callee?.type === "ChainExpression") callee = callee.expression;
+          addSanitizer(callee);
+        });
+      }
+      if (sanitizers.length !== 1) return;
+      const sanitizer = sanitizers[0];
+      const target = modules.get(sanitizer.moduleId);
       if (!target) return;
       let sanitizerName;
       walk(target.node, (property) => {
-        if (property.type === "Property" && property.key?.name === before.property.name && property.value?.type === "ArrowFunctionExpression" && property.value.body.type === "Identifier") sanitizerName = property.value.body.name;
+        if (property.type === "Property" && property.key?.name === sanitizer.property && property.value?.type === "ArrowFunctionExpression" && property.value.body.type === "Identifier") sanitizerName = property.value.body.name;
       });
       if (!sanitizerName) return;
-      let sanitizer;
-      walk(target.node, (fn) => { if (fn.type === "FunctionDeclaration" && fn.id.name === sanitizerName) sanitizer = fn; });
-      if (!sanitizer) return;
-      const body = target.source.slice(sanitizer.start, sanitizer.end);
+      let sanitizerFunction;
+      walk(target.node, (fn) => { if (fn.type === "FunctionDeclaration" && fn.id.name === sanitizerName) sanitizerFunction = fn; });
+      if (!sanitizerFunction) return;
+      const body = target.source.slice(sanitizerFunction.start, sanitizerFunction.end);
       const functions = new Map();
       walk(target.node, (fn) => { if (fn.type === "FunctionDeclaration") functions.set(fn.id.name, fn); });
       const reachable = new Set();
@@ -116,10 +137,42 @@ function inspectNativeScopeProtection(sources) {
       }
       visit(sanitizerName);
       const reachableText = [...reachable].map((name) => { const fn = functions.get(name); return target.source.slice(fn.start, fn.end); }).join("\n");
-      if (body.includes(NATIVE_MARKER) && /\.data|\{data:/.test(body) && reachableText.includes("JSON.stringify") && reachableText.includes("new TextEncoder().encode") && reachableText.includes("byteLength<=2048")) proofs.push({ moduleId: id, sanitizerModuleId: imports.get(before.object.name), sanitizerName });
+      if (body.includes(NATIVE_MARKER) && /\.data|\{data:/.test(body) && reachableText.includes("JSON.stringify") && reachableText.includes("new TextEncoder().encode") && reachableText.includes("byteLength<=2048")) proofs.push({ moduleId: id, sanitizerModuleId: sanitizer.moduleId, sanitizerName });
     });
   }
   return proofs;
+}
+
+function findCurrentInitAnchors(code) {
+  const tree = acorn.parse(code, { ecmaVersion: "latest", sourceType: "module" });
+  const anchors = [];
+  function walk(node, visitor) {
+    if (!node || typeof node !== "object") return;
+    visitor(node);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((child) => walk(child, visitor));
+      else if (value?.type) walk(value, visitor);
+    }
+  }
+  const key = (node) => node?.name ?? node?.value;
+  walk(tree, (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const values = new Map(node.properties.filter((prop) => prop.type === "Property").map((prop) => [key(prop.key), prop.value]));
+    const dsn = values.get("dsn");
+    const transport = values.get("transport");
+    const environment = values.get("environment");
+    const tracesSampleRate = values.get("tracesSampleRate");
+    const integrations = values.get("integrations");
+    if (!dsn || !transport || !environment || !tracesSampleRate || !integrations) return;
+    if (values.has("maxBreadcrumbs") || values.has("beforeBreadcrumb")) return;
+    if (dsn.type !== "MemberExpression" || dsn.object?.type !== "Identifier" || dsn.property?.type !== "Identifier" || dsn.property.name !== "dsn" ||
+        environment.type !== "MemberExpression" || environment.object?.type !== "Identifier" || environment.object.name !== dsn.object.name ||
+        environment.property?.type !== "Identifier" || environment.property.name !== "buildFlavor" ||
+        transport.type !== "ArrowFunctionExpression" || integrations.type !== "ArrowFunctionExpression" ||
+        tracesSampleRate.type !== "Literal" || tracesSampleRate.value !== 0) return;
+    anchors.push(dsn.end);
+  });
+  return anchors;
 }
 
 function patchOne(bundlePath, isCheck) {
@@ -130,11 +183,17 @@ function patchOne(bundlePath, isCheck) {
     return false;
   }
 
-  let count = 0;
-  const next = code.replace(INIT_RE, (_m, dsnExpr) => {
-    count++;
-    return `dsn:${dsnExpr},${OPTS}environment:`;
-  });
+  const legacy = [...code.matchAll(INIT_RE)];
+  const current = legacy.length === 0 ? findCurrentInitAnchors(code) : [];
+  const count = legacy.length || current.length;
+  let next;
+  if (legacy.length === 1) {
+    const dsnExpr = legacy[0][1];
+    next = code.replace(INIT_RE, `dsn:${dsnExpr},${OPTS}environment:`);
+  } else if (current.length === 1) {
+    const at = current[0];
+    next = `${code.slice(0, at)},${OPTS.slice(0, -1)}${code.slice(at)}`;
+  }
 
   if (count !== 1) {
     throw new Error(`${relPath(bundlePath)}: expected exactly one Sentry init anchor, found ${count}`);
@@ -201,4 +260,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { INIT_RE, MARKER, NATIVE_MARKER, TARGETS, TRIM_FN, hasNativeScopeProtection, inspectNativeScopeProtection, patchOne };
+module.exports = { INIT_RE, MARKER, NATIVE_MARKER, TARGETS, TRIM_FN, findCurrentInitAnchors, hasNativeScopeProtection, inspectNativeScopeProtection, patchOne };

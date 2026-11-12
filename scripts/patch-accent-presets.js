@@ -9,6 +9,7 @@ const { parse } = require("acorn");
 const { applyEdits, key, literal, nodes, unique } = require("./patch-ast-util");
 const { SRC_DIR, relPath } = require("./patch-util");
 
+const { isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
 const MODULE = "codex-rebuild-accent-presets.js";
 const SETTINGS_MARKER = "/* codex-rebuild-local-accent-presets:settings */";
 const THEME_MARKER = "/* codex-rebuild-local-accent-presets:theme */";
@@ -50,12 +51,12 @@ function patchSettingsSource(source) {
 
     const disabled = unique(nodes(component, node => node.type === "Property" && key(node.key) === "disabled" &&
       node.value?.type === "BinaryExpression" && ["==", "==="].includes(node.value.operator) &&
-      node.value.left?.type === "Identifier" && literal(node.value.right) === null), "预设禁用条件");
-    const accountTheme = disabled.value.left.name;
+      ((node.value.left?.type === "Identifier" && literal(node.value.right) === null) || (node.value.right?.type === "Identifier" && literal(node.value.left) === null))), "预设禁用条件");
+    const accountTheme = disabled.value.left.type === "Identifier" ? disabled.value.left.name : disabled.value.right.name;
     const selection = unique(nodes(component, node => node.type === "VariableDeclarator" && node.init?.type === "ConditionalExpression" &&
       source.slice(node.init.start, node.init.end).includes(`${theme}.accentSource`) &&
-      source.slice(node.init.start, node.init.end).includes("`chatgpt`") &&
-      source.slice(node.init.start, node.init.end).includes("`custom`")), "当前强调色来源");
+      nodes(node.init, child => literal(child) === "chatgpt").length > 0 &&
+      nodes(node.init, child => literal(child) === "custom").length > 0), "当前强调色来源");
 
     const accountCall = unique(nodes(component, node => node.type === "CallExpression" && node.callee?.type === "Identifier" &&
       node.callee.name === selectAccount), "账户强调色写入");
@@ -160,6 +161,27 @@ function main() {
   let patched = 0;
   for (const directory of directories) {
     try {
+      if (isRspackFrontend(directory.path)) {
+        const settings = unique(findFrontendModules(directory.path, {all:["chatgptAccentPicker.ChatGptAccentPicker.updateError", "accentSource"]}), "强调色设置模块");
+        const themes = findFrontendModules(directory.path, {all:["--color-background-user-message", "--color-image-generation-accent", "accentSource"]});
+        if (!themes.length) throw new Error("强调色主题模块缺失");
+        const targets = [{target:settings, patch:patchSettingsSource}, ...themes.map(target=>({target,patch:patchThemeSource}))];
+        let changed = false;
+        for (const {target,patch} of targets) {
+          const result = patch(target.source);
+          if (!["patched", "already-patched"].includes(result.status)) throw new Error(result.reason ?? result.status);
+          changed ||= result.status === "patched";
+          const ast = parse(result.source, {ecmaVersion:"latest",sourceType:"module"});
+          const imports = ast.body.filter(node=>node.type==="ImportDeclaration");
+          const body = applyEdits(result.source, imports.map(node=>({start:node.start,end:node.end,text:'/* '+MODULE+' */'})));
+          const chunk = replaceFrontendModule(target, body, imports.map(node=>result.source.slice(node.start,node.end).replace('./'+MODULE,'../'+MODULE)));
+          if (!check) fs.writeFileSync(target.file, chunk);
+        }
+        if (!check) fs.copyFileSync(path.join(__dirname, "runtime", "accent-presets.mjs"), path.join(directory.path, MODULE));
+        patched += Number(changed && !check);
+        console.log(`[ok] Rspack 本地强调色设置与主题${check ? "检查通过" : "已应用"}`);
+        continue;
+      }
       const settings = findTarget(directory.path, /^general-settings-.*\.js$/,
         ["chatgptAccentPicker.ChatGptAccentPicker.updateError"], "强调色设置");
       const theme = findThemeTarget(directory.path);

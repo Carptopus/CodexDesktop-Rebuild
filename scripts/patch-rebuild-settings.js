@@ -8,6 +8,7 @@ const { CHANNELS } = require("./runtime/rebuild-settings.cjs");
 const MAIN_MARKER = "/* codex-rebuild-settings:main */";
 const PRELOAD_MARKER = "/* codex-rebuild-settings:preload */";
 const MODULE = "codex-rebuild-settings.cjs";
+const PRELOAD_CONTRACTS = ["sendMessageFromView", "getSystemThemeVariant", "subscribeToSystemThemeVariant", "getSentryInitOptions"];
 function walk(node, visit, ancestors = []) {
   if (!node || typeof node !== "object") return;
   if (node.type) visit(node, ancestors);
@@ -79,7 +80,7 @@ function patchPreload(source) {
   const objects = bridge.type === "ObjectExpression" ? [{ init: bridge }] : declarations.filter(node => node.id.name === bridge.name && node.init?.type === "ObjectExpression");
   if (imports.length !== 1 || objects.length !== 1) throw new Error("官方 preload Electron 依赖或桥对象缺失");
   const object = objects[0].init, props = properties(object);
-  if (!["sendMessageFromView", "getSystemThemeVariant", "getSharedObjectSnapshotValue"].every(name => props[name])) throw new Error("官方 preload 桥缺少必要通信契约");
+  if (!PRELOAD_CONTRACTS.every(name => props[name]?.type === "ArrowFunctionExpression")) throw new Error("官方 preload 桥缺少当前必要通信契约");
   const ipc = `${symbol}.ipcRenderer`;
   const injection = `,${PRELOAD_MARKER}rebuildSettings:{read:()=>${ipc}.sendSync(${JSON.stringify(CHANNELS.read)}),write:patch=>${ipc}.invoke(${JSON.stringify(CHANNELS.write)},patch),onChange:fn=>{if(typeof fn!=="function")throw new TypeError("本地外观配置监听器必须是函数");const listener=(_event,value)=>fn(value);${ipc}.on(${JSON.stringify(CHANNELS.changed)},listener);return()=>${ipc}.removeListener(${JSON.stringify(CHANNELS.changed)},listener)}}`;
   if (source.includes(PRELOAD_MARKER)) {
@@ -136,4 +137,4 @@ function main() {
   }
 }
 if (require.main === module) main();
-module.exports = { patchMain, patchPreload, MAIN_MARKER, PRELOAD_MARKER, MODULE };
+module.exports = { patchMain, patchPreload, MAIN_MARKER, PRELOAD_MARKER, MODULE, PRELOAD_CONTRACTS };

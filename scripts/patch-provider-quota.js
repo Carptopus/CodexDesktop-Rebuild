@@ -9,6 +9,8 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
+const { isRspackFrontend, findFrontendModules, moduleImports, moduleExports,
+  replaceFrontendModule } = require("./rspack-util");
 
 const MARKER = "/* Codex custom provider quota patch */";
 const CUSTOM = "__codexUsesCustomProvider";
@@ -150,6 +152,124 @@ function getProviderMetadata(source, { resolveModule } = {}) {
 function unique(items, label) {
   if (items.length !== 1) throw new Error(`${label} is ambiguous/missing (${items.length})`);
   return items[0];
+}
+
+function rspackProviderMetadata(directory) {
+  const candidates = findFrontendModules(directory, { all: ["modelProvider", "summary"],
+    test: source => /modelProvider\|\|null/.test(source) });
+  const definitions = candidates.flatMap(module => {
+    const ast = parseModule(module.source);
+    return nodes(ast, node => node.type === "VariableDeclarator" && node.id.type === "Identifier"
+      && node.init?.type === "CallExpression" && node.init.arguments.some(argument =>
+        argument.type === "ArrowFunctionExpression" && argument.params[0]?.type === "ObjectPattern"
+        && argument.params[0].properties.some(prop => property(prop) === "summary")
+        && argument.body.type === "LogicalExpression" && argument.body.operator === "||"
+        && property(argument.body.left) === "modelProvider"
+        && argument.body.right.type === "Literal" && argument.body.right.value === null))
+      .map(node => ({ module, exported: unique(moduleExports(module).filter(item =>
+        item.value === node.id.name), "Rspack thread-provider export").exported }));
+  });
+  const ids = [...new Set(definitions.map(item => `${item.module.id}:${item.exported}`))];
+  unique(ids, "Rspack thread-provider definition");
+  return definitions[0];
+}
+
+function patchRspackComposer(source, { providerModule, providerExport, imports }) {
+  const ast = parseModule(source);
+  const composer = unique(ast.body.filter(node => node.type === "FunctionDeclaration"
+    && ["reserve-limit", "usage-limit", "submitDisabledReasons", "resolvedConfig"]
+      .every(text => source.slice(node.start, node.end).includes(text))), "Rspack quota composer");
+  const own = nodes(composer, () => true, true);
+  const declarations = own.filter(node => node.type === "VariableDeclarator");
+  const reasons = ["reserve-limit", "usage-limit"].map(reason => unique(declarations.filter(node =>
+    node.init?.type === "LogicalExpression" && node.init.operator === "&&"
+    && value(node.init.right) === reason), `Rspack ${reason} gate`));
+  const providerDependency = unique(imports.filter(item => item.id === providerModule), "Rspack saved-provider dependency");
+  const configNames = new Set(nodes(composer, node => property(node) === "isConfigDataPending")
+    .map(node => unwrap(node).object?.name));
+  const config = unique(declarations.filter(node => configNames.has(node.id.name)
+    && node.init?.type === "CallExpression"), "Rspack resolved config");
+  const contextName = unique(config.init.arguments.filter(node => node.type === "Identifier"), "Rspack config context").name;
+  const context = unique(own.filter(node => node.type === "AssignmentExpression" && node.left.name === contextName
+    && node.right.type === "ObjectExpression" && ["conversationId", "hostId"].every(name =>
+      node.right.properties.some(prop => property(prop) === name))), "Rspack config context definition").right;
+  const conversation = unique(context.properties.filter(prop => property(prop) === "conversationId"), "Rspack conversation").value;
+  const host = unique(context.properties.filter(prop => property(prop) === "hostId"), "Rspack host").value;
+  if (conversation.type !== "Identifier" || host.type !== "Identifier") throw new Error("Rspack quota context identifiers changed");
+  const flags = reasons.map(reason => {
+    const left = reason.init.left;
+    const flag = left.type === "Identifier" ? left
+      : left.type === "LogicalExpression" && left.operator === "&&"
+        && left.left.type === "UnaryExpression" && left.left.operator === "!"
+        && left.left.argument.name === CUSTOM ? left.right : null;
+    if (flag?.type !== "Identifier") throw new Error("Rspack quota reason condition changed");
+    return flag;
+  });
+  const usageFlag = flags[1];
+  const usageRead = unique(declarations.filter(node => node.id.name === usageFlag.name), "Rspack account usage hook");
+  const call = usageRead.init;
+  const localGate = call?.arguments[0];
+  if (call?.type !== "CallExpression" || call.callee.type !== "SequenceExpression"
+    || call.arguments.length !== 1 || localGate?.type !== "LogicalExpression" || localGate.operator !== "&&"
+    || localGate.left.type !== "BinaryExpression" || localGate.left.operator !== "==="
+    || !([localGate.left.left, localGate.left.right].some(node => node.type === "Identifier" && node.name === host.name)
+      && [localGate.left.left, localGate.left.right].some(node => value(node) === "local"))
+    || localGate.right.type !== "MemberExpression") {
+    throw new Error("Rspack account usage read changed");
+  }
+  const reserveRead = unique(declarations.filter(node => node.id.name === flags[0].name), "Rspack reserve usage hook");
+  if (reserveRead.init?.type !== "CallExpression" || reserveRead.init.arguments.length !== 2
+    || reserveRead.init.arguments[0].type !== "MemberExpression" || reserveRead.init.arguments[1]?.name !== host.name) {
+    throw new Error("Rspack reserve-limit read changed");
+  }
+  const hookNamespace = call.callee.expressions.at(-1)?.object?.name;
+  const threadRead = unique(declarations.filter(node => node.id.name !== THREAD_PROVIDER && node.init?.type === "CallExpression"
+    && node.init.callee.type === "SequenceExpression"
+    && node.init.callee.expressions.at(-1)?.object?.name === hookNamespace
+    && node.init.arguments.length === 2 && node.init.arguments[1]?.name === conversation.name
+    && node.init.arguments[0]?.type === "MemberExpression"
+    && node.init.arguments[0].object.name === providerDependency.local), "Rspack thread atom hook");
+  const scope = unique([...new Set(own.filter(node => property(node) === "kind"
+    && property(unwrap(node).object) === "value").map(node => unwrap(unwrap(node).object).object.name))], "Rspack composer scope");
+  const statement = unique(composer.body.body.filter(node => node.type === "VariableDeclaration"
+    && node.declarations.includes(reasons[0]) && node.declarations.includes(reasons[1])), "Rspack quota reasons declaration");
+  if (source.includes(MARKER)) {
+    const guard = unique(composer.body.body.filter(node => node.type === "VariableDeclaration"
+      && node.declarations.some(declaration => declaration.id.name === CUSTOM)), "Rspack existing provider guard");
+    if (guard.end > statement.start || !reasons.every(reason => source.slice(reason.init.start, reason.init.end).startsWith(`!${CUSTOM}&&`))) {
+      throw new Error("Rspack quota guard marker is incomplete");
+    }
+    return source;
+  }
+  if (config.end > statement.start || [CUSTOM, PROVIDER, THREAD_PROVIDER, PROVIDER_CONFIG].some(name => source.includes(name))) {
+    throw new Error("Rspack quota guard binding or order changed");
+  }
+  const read = source.slice(threadRead.init.callee.start, threadRead.init.callee.end);
+  const guard = `${MARKER}const ${THREAD_PROVIDER}=(${read})(${providerDependency.local}.${providerExport},${conversation.name}),`
+    + `${PROVIDER}=${THREAD_PROVIDER}??(${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_provider),`
+    + `${PROVIDER_CONFIG}=${config.id.name}.isConfigDataPending?null:${config.id.name}.resolvedConfig?.model_providers?.[${PROVIDER}],`
+    + `${CUSTOM}=(${scope}.value.kind==="local"||${scope}.value.kind==="new"&&!${scope}.value.cloudThreadPrototype)`
+    + `&&typeof ${PROVIDER}==="string"&&${PROVIDER}.trim().length>0&&${PROVIDER}!=="openai"`
+    + `&&(${hasExternalBaseUrl.toString()})(${PROVIDER_CONFIG});`;
+  const edits = [{ start: statement.start, end: statement.start, text: guard },
+    ...reasons.map(reason => ({ start: reason.init.start, end: reason.init.start, text: `!${CUSTOM}&&` }))];
+  let result = source;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+  parseModule(result);
+  return result;
+}
+
+function patchRspack(directory, check) {
+  const metadata = rspackProviderMetadata(directory);
+  const targets = findFrontendModules(directory, { all: ["submitDisabledReasons", "reserve-limit", "usage-limit", "isConfigDataPending"] });
+  unique([...new Set(targets.map(target => target.id))], "Rspack quota composer module");
+  for (const target of targets) {
+    const source = patchRspackComposer(target.source, { providerModule: metadata.module.id,
+      providerExport: metadata.exported, imports: moduleImports(target) });
+    const result = replaceFrontendModule(target, source);
+    if (!check && result !== target.chunkSource) fs.writeFileSync(target.file, result);
+  }
+  console.log(`[ok] Rspack Provider-aware quota reasons verified in ${targets.length} chunk(s)`);
 }
 
 // This function is embedded into the frontend and must remain self-contained.
@@ -310,6 +430,7 @@ function main() {
   let failed = 0;
   for (const directory of directories) {
     try {
+      if (isRspackFrontend(directory.path)) { patchRspack(directory.path, check); continue; }
       const files = fs.readdirSync(directory.path).filter(name => name.endsWith(".js"))
         .map(name => ({ name, source: fs.readFileSync(path.join(directory.path, name), "utf8") }));
       const candidates = [];
@@ -348,4 +469,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { MARKER, getProviderMetadata, patchSource };
+module.exports = { MARKER, getProviderMetadata, patchSource, rspackProviderMetadata, patchRspackComposer };

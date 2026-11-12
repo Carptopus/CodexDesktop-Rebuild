@@ -15,6 +15,10 @@ const fs = require("fs");
 const path = require("path");
 const acorn = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
+const {
+  findFrontendModules,
+  isRspackFrontend,
+} = require("./rspack-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const MARKER = "/* Codex：模型选择器改用稳定的点击展开。 */";
@@ -52,6 +56,24 @@ function findTargets(platform) {
       "assets",
     );
     if (!fs.existsSync(assetsDir)) continue;
+
+    if (isRspackFrontend(assetsDir)) {
+      const candidates = findFrontendModules(assetsDir, {
+        all: ["data-model-picker-view", "data-model-selected", "modelListConfig"],
+      });
+      if (candidates.length !== 1) {
+        throw new Error(
+          `${currentPlatform}: expected exactly 1 Rspack model picker, ` +
+          `found ${candidates.length}`,
+        );
+      }
+      targets.push({
+        platform: currentPlatform,
+        rspack: true,
+        ...candidates[0],
+      });
+      continue;
+    }
 
     for (const file of fs.readdirSync(assetsDir)) {
       if (!file.endsWith(".js")) continue;
@@ -105,11 +127,22 @@ function inspectNativeModelList(source) {
       .every((name) => node.properties.some((prop) => keyName(prop.key) === name && prop.value?.type === "Identifier")));
     if (!pattern) return;
     const binding = (name) => pattern.properties.find((prop) => keyName(prop.key) === name).value.name;
-    let panel = false, optionsMap = false, directRows = 0, flyout = false;
+    let panel = false, optionsMap = false, optionsIteration = false;
+    let directRows = 0, flyout = false;
     walk(fn.body, (node) => {
       if (node.type === "MemberExpression" && keyName(node.property) === "FlyoutSubmenuItem") flyout = true;
       if (node.type === "Property" && keyName(node.key) === "data-model-picker-view"
         && node.value.type === "Identifier" && node.value.name === binding("menuView")) panel = true;
+      if (node.type === "ForOfStatement") {
+        walk(node.right, (candidate) => {
+          if (candidate.type === "MemberExpression" &&
+              keyName(candidate.property) === "options" &&
+              candidate.object.type === "Identifier" &&
+              candidate.object.name === binding("modelListConfig")) {
+            optionsIteration = true;
+          }
+        });
+      }
       if (node.type !== "CallExpression") return;
       const callee = node.callee;
       if (callee.type === "MemberExpression" && keyName(callee.property) === "map"
@@ -132,7 +165,9 @@ function inspectNativeModelList(source) {
       });
       if (preventDefault && select && returnToPanel) directRows++;
     });
-    if (panel && optionsMap && directRows > 0 && !flyout) candidates.push({ functionName: fn.id.name, directRows });
+    if (panel && (optionsMap || optionsIteration) && directRows > 0 && !flyout) {
+      candidates.push({ functionName: fn.id.name, directRows });
+    }
   });
   if (candidates.length > 1) throw new Error("Multiple native model-list implementations need review");
   return candidates[0] || null;
@@ -205,10 +240,15 @@ function main() {
   let patched = 0;
   let failed = 0;
   for (const target of targets) {
-    const label = relPath(target.path);
+    const label = relPath(target.rspack ? target.file : target.path);
     const native = inspectNativeModelList(target.source);
     if (native) {
       console.log(`  [ok] ${label}: native inline model list verified (${native.functionName}, ${native.directRows} direct row renderer); submenu patch not needed`);
+      continue;
+    }
+    if (target.rspack) {
+      console.log(`  [x] ${label}: Rspack native model-list structure changed; needs explicit adaptation`);
+      failed++;
       continue;
     }
     if (!TARGET_SIGNATURES.every((signature) => target.source.includes(signature))) {
@@ -276,4 +316,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { findTargets, patchSource };
+module.exports = { findTargets, inspectNativeModelList, patchSource };

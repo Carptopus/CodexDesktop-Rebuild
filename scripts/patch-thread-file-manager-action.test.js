@@ -15,6 +15,7 @@ const {
   SIDEBAR_MARKER,
   hasSidebarMenuSignatures,
   hasNativeDirectAction,
+  patchRspackModuleSource,
   patchSidebarSource,
   patchSource,
   selectTargets,
@@ -610,6 +611,77 @@ test("菜单未知时仍进入检查并失败，不因 chunk 变化静默跳过"
   ]);
   assert.equal(targets.length, 1);
   assert.equal(patchSource(targets[0].source).status, "unexpected-menu-builder-count");
+});
+
+function createRspackWorkspaceMenuBundle() {
+  return [
+    "function buildOpen({scope:s,cwd:c,hostId:h}){",
+    "return function({targets:f,failed:u,worktrees:w,isEverydayWorkMode:m,onOpenInTarget:o}){",
+    "return[{id:\"open-workspace-in\",message:zR({id:\"localConversationPage.openPrimaryTarget\"}),",
+    "icon:\"open-icon\",onSelect:()=>o(\"editor\",\"C:/Code.exe\",\"C:/worktree\")}]}",
+    "}",
+    "const invocation={scope:rootScope,cwd:\"C:/repo\",hostId:\"local\",",
+    "onOpenInTarget:(target,appPath,worktree)=>{",
+    "rootScope.query.setData(key,{preferredTarget:target},value=>value);",
+    "return rootScope.get(mut).mutateAsync({target,appPath,",
+    "persistPreferredTargetPath:worktree})}};",
+  ].join("");
+}
+
+test("Rspack 工作区菜单顶层入口不保存偏好，原打开方式仍保存", async () => {
+  const result = patchRspackModuleSource({
+    source: createRspackWorkspaceMenuBundle(),
+    requireName: "n",
+  });
+  assert.equal(result.status, "patched", result.error?.message);
+  assert.match(result.source, /onSelect:\(\)=>o\(`fileManager`,void 0,void 0,!1\)/);
+  assert.match(result.source, /__crPersistPreferredTarget&&\(rootScope\.query\.setData/);
+  assert.match(result.source, /persistPreferredTargetPath:__crPersistPreferredTarget\?worktree:void 0/);
+  assert.equal(patchRspackModuleSource({ source: result.source }).status, "already-patched");
+
+  const ast = acorn.parse(result.source, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowReturnOutsideFunction: true,
+  });
+  const builderNode = nodes(ast, (node) =>
+    node.type === "FunctionExpression" &&
+    node.params[0]?.properties?.some((property) => property.key?.name === "targets"))[0];
+  const callbackNode = nodes(ast, (node) =>
+    node.type === "Property" && node.key?.name === "onOpenInTarget" &&
+    node.value?.type === "ArrowFunctionExpression")[0];
+  assert.ok(builderNode && callbackNode);
+  let writes = 0;
+  let opened = null;
+  const scope = {
+    query: { setData() { writes++; } },
+    get: () => ({ async mutateAsync(value) { opened = value; return { success: true }; } }),
+  };
+  const callback = vm.runInNewContext(
+    `(${result.source.slice(callbackNode.value.start, callbackNode.value.end)})`,
+    { rootScope: scope, key: "targets", mut: "open" },
+  );
+  const builder = vm.runInNewContext(
+    `(${result.source.slice(builderNode.start, builderNode.end)})`,
+    { zR: (value) => value, navigator: { platform: "Win32" } },
+  );
+  const items = builder({
+    targets: [{ target: "fileManager", available: true, resolvedIcon: "folder-icon" }],
+    failed: false,
+    worktrees: [],
+    isEverydayWorkMode: false,
+    onOpenInTarget: callback,
+  });
+  assert.equal(items[0].id, DIRECT_ACTION_ID);
+  assert.equal(items[0].message.id, "sidebarElectron.openWorkspaceRootInExplorer");
+  await items[0].onSelect();
+  assert.equal(opened.target, "fileManager");
+  assert.equal(opened.persistPreferredTargetPath, undefined);
+  assert.equal(writes, 0);
+  await items[1].onSelect();
+  assert.equal(opened.target, "editor");
+  assert.equal(opened.persistPreferredTargetPath, "C:/worktree");
+  assert.equal(writes, 1);
 });
 
 test("CLI 在实际资源目录执行 check → apply → check，重复目标在写入前被拒绝", t => {

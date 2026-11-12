@@ -6,7 +6,15 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const vm = require("node:vm");
 const { parse } = require("acorn");
-const { ERROR_ID, MARKER, patchSource, validatePatched } = require("./patch-thread-copy-markdown");
+const { nodes } = require("./patch-ast-util");
+const {
+  ERROR_ID,
+  MARKER,
+  patchRspackModuleSource,
+  patchSource,
+  validatePatched,
+  validateRspackPatched,
+} = require("./patch-thread-copy-markdown");
 
 const nativeFixture = "async function getComplete(client,id){if(!client)throw Error('Conversation must be resumed before loading history');let result=complete(client.getConversation(id));return result}" +
   "async function renderNative({visibleTurnEntries,cwd,title}){return renderConversationMarkdown(visibleTurnEntries,cwd,title)}" +
@@ -147,6 +155,102 @@ test("已有标记必须通过补丁后结构验证", () => {
   const damaged = fixture.replace("function copy(", `function copy(){${MARKER};function copy(`);
   assert.equal(patchSource(damaged).status, "unexpected-shape");
   assert.throws(() => validatePatched(`${MARKER} broken`));
+});
+
+test("旧布局校验仍强制完整历史读取和 getConversation", () => {
+  const patched = patchSource(fixture);
+  assert.equal(patched.status, "patched");
+  assert.throws(() => validatePatched(patched.source.replaceAll("getConversation(", "readView(")));
+  assert.throws(() => validatePatched(patched.source.replace("会话历史不完整", "没有内容")));
+});
+
+test("Rspack 复制动作在强制加载后直接使用经导出关系定位的完整渲染器", async () => {
+  const actionSource = "const copy=" + fixture.slice(nativeFixture.length)
+    .replace("function copy(", "function(");
+  const renderModule = [
+    'n.d(t,{},{o:async function(e,{conversationId:t,isBackgroundSubagentsEnabled:n}){',
+    'let{visibleTurnEntries:u}=e.get(s.Ps,{conversationId:t,isBackgroundSubagentsEnabled:n});',
+    'return r({visibleTurnEntries:u});}});',
+    'async function l({visibleTurnEntries:e}){return renderConversationMarkdown(e)}',
+    'var s=n("state"),r=n("render");',
+  ].join("");
+  const chunkSource = [
+    "export const __webpack_modules__={",
+    `A(e,t,n){${actionSource}},`,
+    `R(e,t,n){${renderModule}}`,
+    "};",
+  ].join("");
+  const result = patchRspackModuleSource({
+    id: "A",
+    source: actionSource,
+    chunkSource,
+    requireName: "n",
+  });
+  assert.equal(result.status, "patched", result.reason);
+  assert.match(result.source, /var __crMarkdown=n\("R"\)/);
+  assert.match(result.source, /await __crMarkdown\.o\(/);
+  assert.doesNotMatch(result.source, /await r\(\)/);
+  validateRspackPatched(result.source);
+
+  const actionAst = parse(result.source, {
+    ecmaVersion: "latest",
+    allowReturnOutsideFunction: true,
+  });
+  const [actionNode] = nodes(actionAst, (node) =>
+    node.type === "FunctionExpression" &&
+    result.source.slice(node.start, node.end).includes(MARKER));
+  const calls = [];
+  const written = [];
+  const notices = [];
+  const client = {
+    async ensureConversationHistoryLoaded(...args) { calls.push(args); },
+  };
+  const action = vm.runInNewContext(
+    `(${result.source.slice(actionNode.start, actionNode.end)})`,
+    {
+      n: (id) => {
+        assert.equal(id, "R");
+        return { o: async (_scope, options) => {
+          assert.equal(options.conversationId, "thread");
+          return "# 完整历史";
+        } };
+      },
+      manager: () => client,
+      host: "host",
+      toasts: "toasts",
+      v: { Id: "toasts" },
+      messages: {
+        copyConversationMarkdownSuccess: "成功",
+        copyConversationMarkdownError: "失败",
+      },
+      write: async (value) => { written.push(value); return true; },
+    },
+  );
+  const scope = {
+    get(token) {
+      if (token === "toasts") {
+        return {
+          success: (value) => notices.push(["success", value]),
+          danger: (value) => notices.push(["danger", value]),
+        };
+      }
+      return client;
+    },
+  };
+  await action({
+    scope,
+    conversationId: "thread",
+    parentConversationId: null,
+    getMarkdown: async () => { throw new Error("不能读取当前页 Markdown"); },
+    intl: { formatMessage: (value) => value },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(JSON.stringify(calls), JSON.stringify([["thread", [], { force: true }]]));
+  assert.equal(
+    JSON.stringify(written),
+    JSON.stringify(["# 完整历史"]),
+    JSON.stringify(notices),
+  );
 });
 
 test("check 模式定位单一原生入口，未改变输入内容", () => {
