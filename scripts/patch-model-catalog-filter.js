@@ -14,6 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
+const { frontendFiles, rspackModules } = require("./rspack-util");
 
 const MARKER = "/* Codex：模型目录忽略服务端 allowlist。 */";
 
@@ -166,20 +167,74 @@ function findTargets(platform) {
     );
     if (!fs.existsSync(assetsDir)) continue;
 
-    for (const file of fs.readdirSync(assetsDir)) {
-      if (!file.endsWith(".js")) continue;
-      const filePath = path.join(assetsDir, file);
+    for (const filePath of frontendFiles(assetsDir)) {
       const source = fs.readFileSync(filePath, "utf-8");
-      if (
-        source.includes("availableModels") &&
-        source.includes("useHiddenModels") &&
-        source.includes(".hidden")
-      ) {
-        targets.push({ platform: currentPlatform, path: filePath, source });
+      if (source.includes("export const __webpack_modules__=")
+        && !source.slice(0, 220).includes("exports=JSON.parse(")
+        && source.includes("availableModels")
+        && source.includes("useHiddenModels")
+        && source.includes(".hidden")) {
+        for (const module of rspackModules(source)) {
+          if (!module.source.includes("availableModels")
+            || !module.source.includes("useHiddenModels")
+            || !module.source.includes(".hidden")) continue;
+          targets.push({
+            platform: currentPlatform,
+            path: filePath,
+            source: module.source,
+            chunkSource: source,
+            kind: "rspack",
+            moduleId: module.id,
+            start: module.start,
+            end: module.end,
+          });
+        }
+      } else if (source.includes("availableModels")
+        && source.includes("useHiddenModels")
+        && source.includes(".hidden")) {
+        targets.push({
+          platform: currentPlatform,
+          path: filePath,
+          source,
+          kind: "legacy",
+          start: 0,
+          end: source.length,
+        });
       }
     }
   }
   return targets;
+}
+
+function writePatchedTargets(results, check) {
+  const byFile = new Map();
+  for (const { target, result } of results) {
+    if (target.kind !== "rspack") continue;
+    const group = byFile.get(target.path) || { target, replacements: [] };
+    group.replacements.push({
+      start: target.start,
+      end: target.end,
+      replacement: result.source,
+    });
+    byFile.set(target.path, group);
+  }
+
+  for (const group of byFile.values()) {
+    let next = group.target.chunkSource;
+    for (const replacement of group.replacements
+      .sort((left, right) => right.start - left.start)) {
+      next = next.slice(0, replacement.start)
+        + replacement.replacement
+        + next.slice(replacement.end);
+    }
+    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+    if (!check) fs.writeFileSync(group.target.path, next, "utf-8");
+  }
+  for (const { target, result } of results) {
+    if (target.kind === "legacy" && !check) {
+      fs.writeFileSync(target.path, result.source, "utf-8");
+    }
+  }
 }
 
 function main() {
@@ -191,21 +246,23 @@ function main() {
   const targets = findTargets(platform);
 
   if (targets.length === 0) {
-    console.log("  [skip] No model catalog filter bundle found");
+    console.log("  [x] No model catalog filter target found in legacy or Rspack frontend");
+    process.exitCode = 1;
     return;
   }
 
   let changed = 0;
   let failed = 0;
+  const completed = [];
   for (const target of targets) {
-    const label = relPath(target.path);
+    const label = `${relPath(target.path)}${target.moduleId ? `#${target.moduleId}` : ""}`;
     const result = patchSource(target.source);
     if (result.status === "already-patched") {
       console.log(`  [ok] ${label}: already patched`);
       continue;
     }
     if (result.status === "no-allowlist-gate") {
-      console.log(`  [ok] ${label}: no allowlist gate (call-site only)`);
+      console.log(`  [ok] ${label}: native path has no catalog allowlist gate (call-site only)`);
       continue;
     }
     if (result.status !== "patched") {
@@ -222,12 +279,19 @@ function main() {
         `  [?] ${label}: would ignore ${result.patches.length} availableModels allowlist gate(s)`,
       );
     } else {
-      fs.writeFileSync(target.path, result.source, "utf-8");
+      completed.push({ target, result });
       console.log(
         `  [ok] ${label}: ignored ${result.patches.length} availableModels allowlist gate(s)`,
       );
     }
     changed++;
+  }
+
+  try {
+    writePatchedTargets(completed, isCheck);
+  } catch (error) {
+    console.log(`  [x] model catalog output: ${error.message}`);
+    failed++;
   }
 
   console.log(

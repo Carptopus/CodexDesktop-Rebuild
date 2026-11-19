@@ -80,6 +80,68 @@ function findLimitSequences(ast) {
   return matches;
 }
 
+// Newer bundles inline the same limit in the default and Math.min branches.
+function findInlineLimits(ast) {
+  const matches = [];
+  const diffArrays = new Set();
+  walk(ast, (node) => {
+    if (node.type === "VariableDeclarator" && node.id?.type === "Identifier" &&
+        node.init?.type === "ArrayExpression" &&
+        node.init.elements.some(item => item?.type === "Literal" && item.value === "diff") &&
+        node.init.elements.some(item => item?.type === "Literal" && item.value === "--no-ext-diff")) {
+      diffArrays.add(node.id.name);
+    }
+  });
+  walk(ast, (fn) => {
+    if (!["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(fn.type)) return;
+    const declarations = [];
+    function walkLocal(node, visitor) {
+      if (!node || typeof node !== "object") return;
+      if (node !== fn.body && ["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type)) return;
+      visitor(node);
+      for (const [key, value] of Object.entries(node)) {
+        if (["type", "start", "end"].includes(key)) continue;
+        if (Array.isArray(value)) value.forEach(item => walkLocal(item, visitor));
+        else if (value?.type) walkLocal(value, visitor);
+      }
+    }
+    walkLocal(fn.body, (node) => { if (node.type === "VariableDeclarator") declarations.push(node); });
+    for (const declaration of declarations) {
+      const expr = declaration.init;
+      if (declaration.id.type !== "Identifier" || expr?.type !== "ConditionalExpression") continue;
+      const test = expr.test;
+      if (test?.type !== "BinaryExpression" || !["==", "==="].includes(test.operator)) continue;
+      const input = test.left.type === "Identifier" && test.right.type === "Literal" && test.right.value === null
+        ? test.left.name : test.right.type === "Identifier" && test.left.type === "Literal" && test.left.value === null
+          ? test.right.name : null;
+      const min = expr.alternate;
+      if (input == null || min?.type !== "CallExpression" || min.callee?.type !== "MemberExpression" ||
+          min.callee.object?.name !== "Math" || min.callee.property?.name !== "min" || min.arguments.length !== 2 ||
+          min.arguments[0]?.name !== input) continue;
+      const values = [staticNumber(expr.consequent), staticNumber(min.arguments[1])];
+      if (!values.every(value => [OLD_DIFF_LIMIT, NEW_DIFF_LIMIT].includes(value))) continue;
+      const inputBound = declarations.some(item => item.id?.type === "ObjectPattern" &&
+        item.id.properties.some(property => property.type === "Property" &&
+          (property.key.name ?? property.key.value) === "maxOutputBytes" && property.value?.name === input));
+      if (!inputBound) continue;
+      let forwardsLimit = false;
+      walkLocal(fn.body, (node) => {
+        if (node.type !== "CallExpression") return;
+        const hasDiffArgs = node.arguments.some(argument => argument.type === "ArrayExpression" &&
+          argument.elements.some(item => item?.type === "SpreadElement" &&
+            item.argument?.type === "Identifier" && diffArrays.has(item.argument.name)));
+        const hasLimit = node.arguments.some(argument => argument.type === "ObjectExpression" &&
+          argument.properties.some(property => property.type === "Property" &&
+            (property.key.name ?? property.key.value) === "maxOutputBytes" &&
+            property.value?.type === "Identifier" && property.value.name === declaration.id.name));
+        if (hasDiffArgs && hasLimit) forwardsLimit = true;
+      });
+      if (forwardsLimit) matches.push({ nodes: [expr.consequent, min.arguments[1]], values });
+    }
+  });
+  return matches;
+}
+
 function patchSource(source) {
   let ast;
   try {
@@ -88,16 +150,26 @@ function patchSource(source) {
     return { status: "parse-failed", error, source };
   }
 
-  const matches = findLimitSequences(ast);
-  if (matches.length !== 1) {
-    return { status: "unexpected-anchor-count", count: matches.length, source };
+  const sequences = findLimitSequences(ast);
+  const inline = findInlineLimits(ast);
+  const count = sequences.length + inline.length;
+  if (count !== 1) {
+    return { status: "unexpected-anchor-count", count, source };
   }
-  if (matches[0].value === NEW_DIFF_LIMIT) {
+  const targets = sequences.length
+    ? [sequences[0].declaration.init]
+    : inline[0].nodes;
+  const values = sequences.length ? [sequences[0].value] : inline[0].values;
+  if (values.every(value => value === NEW_DIFF_LIMIT)) {
     return { status: "already-patched", source };
   }
-
-  const init = matches[0].declaration.init;
-  const next = source.slice(0, init.start) + NEW_DIFF_LIMIT_SOURCE + source.slice(init.end);
+  if (!values.every(value => value === OLD_DIFF_LIMIT)) {
+    return { status: "unexpected-anchor-count", count: 0, source };
+  }
+  let next = source;
+  for (const target of targets.sort((a, b) => b.start - a.start)) {
+    next = next.slice(0, target.start) + NEW_DIFF_LIMIT_SOURCE + next.slice(target.end);
+  }
   try {
     parseCode(next);
   } catch (error) {

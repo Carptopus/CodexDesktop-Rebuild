@@ -32,7 +32,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildFeatureBundles, relPath } = require("./patch-util");
 
 const LIMITS = "resourceLimits:{maxOldGenerationSizeMb:1024,maxYoungGenerationSizeMb:128}";
 // 已注入的旧上限（用于降级/升级替换）
@@ -149,10 +149,10 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main-.*\.js$/,
+  const bundles = locateBuildFeatureBundles({
     platform,
+    label: "worker manager",
+    match: code => code.includes("workerData") && /name:this\.id/.test(code),
   });
 
   if (bundles.length === 0) {

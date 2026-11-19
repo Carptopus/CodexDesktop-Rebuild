@@ -21,6 +21,11 @@ const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
 const { SRC_DIR, relPath } = require("./patch-util");
+const { frontendFiles, rspackModules } = require("./rspack-util");
+
+const AUTH_MARKER = "/* Codex：插件目录认证门槛已关闭。 */";
+const GOAL_MARKER = "/* Codex：Goal 旧门槛已关闭。 */";
+const BROWSER_MARKER = "/* Codex：浏览器功能 gate 已关闭：";
 
 function walk(node, visitor) {
   if (!node || typeof node !== "object") return;
@@ -52,35 +57,63 @@ function nodeContainsString(node, source, str) {
   return source.slice(node.start, node.end).includes(str);
 }
 
-// ── Rule 1: Plugin auth — function(e){return e!==`chatgpt`} → !1 ──
+// ── Rule 1: Plugin auth — queryFn 内的 await auth(...) !== "chatgpt" ──
+
+function isPluginEndpointSource(source) {
+  return source.includes("/ps/plugins/")
+    || source.includes("/ps/plugin-categories/");
+}
+
+function isChatGptComparison(node) {
+  return node?.type === "BinaryExpression"
+    && node.operator === "!=="
+    && (getLiteralValue(node.left) === "chatgpt"
+      || getLiteralValue(node.right) === "chatgpt");
+}
 
 function findPluginAuthPatches(ast, source) {
-  const patches = [];
+  const contextual = [];
+  const legacy = [];
   walk(ast, (node) => {
-    if (node.type !== "FunctionDeclaration" && node.type !== "FunctionExpression")
+    if (!["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type)) {
       return;
+    }
+    const functionSource = source.slice(node.start, node.end);
+    if (!isPluginEndpointSource(functionSource)) return;
+    walk(node, (inner) => {
+      if (!isChatGptComparison(inner)) return;
+      const authSide = getLiteralValue(inner.left) === "chatgpt" ? inner.right : inner.left;
+      if (authSide.type !== "AwaitExpression") return;
+      const expr = source.slice(inner.start, inner.end);
+      contextual.push({
+        id: "plugin_auth_gate",
+        start: inner.start,
+        end: inner.end,
+        replacement: `${AUTH_MARKER}!1`,
+        original: expr,
+      });
+    });
+  });
+  if (contextual.length > 0) return contextual;
+
+  // 旧版曾把认证判断单独放进一个只返回条件的函数。当前 queryFn 结构已
+  // 由上面的 endpoint 上下文匹配；这里只为旧布局保留原语义。
+  walk(ast, (node) => {
+    if (node.type !== "FunctionDeclaration" && node.type !== "FunctionExpression") return;
     const body = node.body;
     if (!body || body.type !== "BlockStatement" || body.body.length !== 1) return;
-    const ret = body.body[0];
-    if (ret.type !== "ReturnStatement" || !ret.argument) return;
-    const arg = ret.argument;
-    if (arg.type !== "BinaryExpression" || arg.operator !== "!==") return;
-    if (
-      getLiteralValue(arg.left) !== "chatgpt" &&
-      getLiteralValue(arg.right) !== "chatgpt"
-    )
-      return;
-    const expr = source.slice(arg.start, arg.end);
-    if (expr === "!1") return;
-    patches.push({
+    const statement = body.body[0];
+    if (statement.type !== "ReturnStatement" || !isChatGptComparison(statement.argument)) return;
+    const expr = source.slice(statement.argument.start, statement.argument.end);
+    legacy.push({
       id: "plugin_auth_gate",
-      start: arg.start,
-      end: arg.end,
-      replacement: "!1",
+      start: statement.argument.start,
+      end: statement.argument.end,
+      replacement: `${AUTH_MARKER}!1`,
       original: expr,
     });
   });
-  return patches;
+  return legacy;
 }
 
 // ── Rule 6: Force /goal slash command available ──
@@ -117,11 +150,92 @@ function findGoalGatePatches(ast, source) {
       id: "goal_gate_bypass",
       start: node.start,
       end: node.end,
-      replacement: rightSrc,
+      replacement: `${GOAL_MARKER}${rightSrc}`,
       original: fullSrc.slice(0, 50) + "...",
     });
   });
   return patches;
+}
+
+function inspectNativeGoalGate(source) {
+  if (!source.includes("goalSlashCommand")) return false;
+  let ast;
+  try {
+    ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  } catch {
+    return false;
+  }
+
+  const parents = new Map();
+  function index(node, parent = null) {
+    if (!node || typeof node !== "object") return;
+    if (node.type) parents.set(node, parent);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          if (child && typeof child === "object" && child.type) index(child, node);
+        }
+      } else if (value && typeof value === "object" && value.type) {
+        index(value, node);
+      }
+    }
+  }
+  index(ast);
+
+  let resolver = null;
+  walk(ast, (node) => {
+    if (resolver || node.type !== "FunctionDeclaration" || !node.id) return;
+    const text = source.slice(node.start, node.end);
+    if (/^function [\w$]+\([\w$]+,[\w$]+\)\{return"cloud"!==[\w$]+&&\("local"!==[\w$]+\.kind\|\|"side"!==[\w$]+\.placement\)\}/.test(text)) {
+      resolver = node;
+    }
+  });
+  if (!resolver) return false;
+
+  const callVariables = new Set();
+  walk(ast, (node) => {
+    if (node.type !== "CallExpression"
+      || node.callee.type !== "Identifier"
+      || node.callee.name !== resolver.id.name
+      || node.arguments.length !== 2) return;
+    let parent = parents.get(node);
+    if (parent?.type === "VariableDeclarator" && parent.init === node
+      && parent.id.type === "Identifier") {
+      callVariables.add(parent.id.name);
+    } else if (parent?.type === "AssignmentExpression" && parent.right === node
+      && parent.left.type === "Identifier") {
+      callVariables.add(parent.left.name);
+    }
+  });
+  if (callVariables.size === 0) return false;
+
+  const aliases = new Set();
+  walk(ast, (node) => {
+    if (node.type === "VariableDeclarator" && node.id.type === "Identifier"
+      && node.init?.type === "Identifier" && callVariables.has(node.init.name)) {
+      aliases.add(node.id.name);
+    }
+  });
+  if (aliases.size === 0) return false;
+
+  const enabledVariables = new Set();
+  walk(ast, (node) => {
+    if (node.type === "VariableDeclarator" && node.id.type === "Identifier"
+      && node.init?.type === "LogicalExpression" && node.init.operator === "&&"
+      && node.init.left.type === "Identifier" && aliases.has(node.init.left.name)) {
+      enabledVariables.add(node.id.name);
+    }
+  });
+  if (enabledVariables.size === 0) return false;
+
+  let linked = false;
+  walk(ast, (node) => {
+    if (linked || node.type !== "Property") return;
+    const name = node.key?.name ?? node.key?.value;
+    if (name === "enabled" && node.value?.type === "Identifier"
+      && enabledVariables.has(node.value.name)) linked = true;
+  });
+  return linked;
 }
 
 // ── Rule 2: Force browser-use availability ──
@@ -186,35 +300,36 @@ function findStatsigGatePatches(ast, source) {
   const patches = [];
 
   walk(ast, (node) => {
-    if (node.type !== "FunctionDeclaration" && node.type !== "FunctionExpression")
+    if (!["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type))
       return;
     const slice = source.slice(node.start, node.end);
-    // Must contain a known feature context
-    let hasFeatureContext = false;
-    for (const feat of FEATURE_CONTEXTS) {
-      if (slice.includes(`\`${feat}\``) || slice.includes(`"${feat}"`)) {
-        hasFeatureContext = true;
-        break;
-      }
-    }
-    if (!hasFeatureContext) return;
+    const feature = [...FEATURE_CONTEXTS].find((name) =>
+      slice.includes(`featureName:"${name}"`)
+      || slice.includes(`featureName:\`${name}\``)
+      || slice.includes(`featureName:'${name}'`),
+    );
+    if (!feature) return;
 
-    // Find CallExpression: identifier(`numericString`)
     walk(node, (inner) => {
       if (inner.type !== "CallExpression") return;
-      if (inner.callee?.type !== "Identifier") return;
+      const callee = inner.callee;
+      const directCall = callee?.type === "Identifier";
+      const sequenceCall = callee?.type === "SequenceExpression"
+        && callee.expressions.length === 2
+        && callee.expressions[1]?.type === "MemberExpression";
+      if (!directCall && !sequenceCall) return;
       if (inner.arguments?.length !== 1) return;
       const argVal = getLiteralValue(inner.arguments[0]);
       if (!argVal || !/^\d{6,}$/.test(argVal)) return;
 
       const expr = source.slice(inner.start, inner.end);
-      if (expr === "!0") return;
+      if (expr.includes(BROWSER_MARKER)) return;
 
       patches.push({
         id: `statsig_gate_${argVal}`,
         start: inner.start,
         end: inner.end,
-        replacement: "!0",
+        replacement: `${BROWSER_MARKER}${feature}:${argVal} */!0`,
         original: expr,
       });
     });
@@ -365,72 +480,242 @@ function findFeatureDefaultPatches(ast, source) {
 
 // ── Target location ──
 
-function locateTargets(platform) {
-  const platforms = platform
-    ? [platform]
-    : ["mac-arm64", "mac-x64", "win"].filter((p) =>
-        fs.existsSync(path.join(SRC_DIR, p, "_asar", "webview", "assets")),
-      );
+function hasPluginQueryAuthGate(source) {
+  if (source.includes(AUTH_MARKER)) return true;
+  if (!isPluginEndpointSource(source)) return false;
+  let ast;
+  try {
+    ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  } catch {
+    return false;
+  }
+  let found = false;
+  walk(ast, (node) => {
+    if (found || !["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(node.type)) {
+      return;
+    }
+    const functionSource = source.slice(node.start, node.end);
+    if (!isPluginEndpointSource(functionSource)) return;
+    walk(node, (inner) => {
+      if (!isChatGptComparison(inner)) return;
+      const authSide = getLiteralValue(inner.left) === "chatgpt" ? inner.right : inner.left;
+      if (authSide.type === "AwaitExpression") found = true;
+    });
+  });
+  return found;
+}
 
+function rulesForSource(source) {
+  const rules = [];
+  if (hasPluginQueryAuthGate(source)) {
+    rules.push("auth");
+  }
+  if ([...FEATURE_CONTEXTS].some((name) =>
+    source.includes(`featureName:"${name}"`)
+    || source.includes(`featureName:\`${name}\``)
+    || source.includes(`featureName:'${name}'`)
+  ) || source.includes(BROWSER_MARKER)) {
+    rules.push("browser");
+  }
+  if (source.includes("goalSlashCommand") || source.includes(GOAL_MARKER)) {
+    rules.push("goal");
+  }
+  return rules;
+}
+
+function getPlatforms(platform, sourceDir) {
+  if (platform) return [platform];
+  return ["mac-arm64", "mac-x64", "win"].filter((name) =>
+    fs.existsSync(path.join(sourceDir, name, "_asar", "webview", "assets")),
+  );
+}
+
+function locateTargets(platform, sourceDir = SRC_DIR) {
   const targets = [];
-
-  for (const plat of platforms) {
-    const assetsDir = path.join(SRC_DIR, plat, "_asar", "webview", "assets");
+  for (const currentPlatform of getPlatforms(platform, sourceDir)) {
+    const assetsDir = path.join(
+      sourceDir,
+      currentPlatform,
+      "_asar",
+      "webview",
+      "assets",
+    );
     if (!fs.existsSync(assetsDir)) continue;
 
-    for (const f of fs.readdirSync(assetsDir)) {
-      if (!f.endsWith(".js")) continue;
-      const fp = path.join(assetsDir, f);
-      const src = fs.readFileSync(fp, "utf-8");
-
-      let dominated = false;
-
-      // Rule 1: plugin auth — small file with chatgpt + !==
-      if (src.includes("chatgpt") && src.includes("!==") && src.length < 5000) {
-        targets.push({ platform: plat, path: fp, rules: ["auth"] });
-        dominated = true;
+    let hasRspackFrontend = false;
+    const legacyCandidates = [];
+    for (const file of frontendFiles(assetsDir)) {
+      const source = fs.readFileSync(file, "utf-8");
+      if (source.includes("export const __webpack_modules__=")
+        && !source.slice(0, 220).includes("exports=JSON.parse(")
+        && (source.includes("/ps/plugin")
+          || source.includes("featureName:")
+          || source.includes("goalSlashCommand")
+          || source.includes(AUTH_MARKER)
+          || source.includes(BROWSER_MARKER)
+          || source.includes(GOAL_MARKER))) {
+        hasRspackFrontend = true;
+        let modules;
+        try {
+          modules = rspackModules(source);
+        } catch (error) {
+          targets.push({
+            platform: currentPlatform,
+            path: file,
+            kind: "rspack",
+            parseError: error,
+            rules: [],
+          });
+          continue;
+        }
+        for (const module of modules) {
+          const rules = rulesForSource(module.source);
+          if (rules.length === 0) continue;
+          targets.push({
+            platform: currentPlatform,
+            path: file,
+            source: module.source,
+            chunkSource: source,
+            kind: "rspack",
+            moduleId: module.id,
+            start: module.start,
+            end: module.end,
+            rules,
+          });
+        }
+        continue;
       }
 
-      // Rule 2+3: browser/computer use availability
-      if (
-        f.startsWith("use-in-app-browser-use-availability-") ||
-        f.startsWith("use-browser-agent-availability-")
-      ) {
-        targets.push({ platform: plat, path: fp, rules: ["avail", "gate"] });
-        dominated = true;
+      const basename = path.basename(file);
+      const rules = [];
+      if (source.length < 10000 && source.includes("chatgpt")
+        && source.includes("!==")) {
+        rules.push("auth");
       }
-
-      // Rule 6: composer — goal gate bypass
-      if (f.startsWith("composer-") && src.includes("goalSlashCommand")) {
-        targets.push({ platform: plat, path: fp, rules: ["goal"] });
+      if (basename.startsWith("use-in-app-browser-use-availability-")
+        || basename.startsWith("use-browser-agent-availability-")) {
+        rules.push("avail", "gate", "browser");
       }
-
-      // Rule 1 fallback: other files with authMethod chatgpt patterns
-      if (
-        !dominated &&
-        src.length < 10000 &&
-        src.includes("chatgpt") &&
-        (src.includes("authMethod") || src.includes("!=="))
-      ) {
-        targets.push({ platform: plat, path: fp, rules: ["auth"] });
+      if (basename.startsWith("composer-") && source.includes("goalSlashCommand")) {
+        rules.push("goal");
+      }
+      if (rules.length > 0) {
+        legacyCandidates.push({
+          platform: currentPlatform,
+          path: file,
+          source,
+          kind: "legacy",
+          start: 0,
+          end: source.length,
+          rules,
+        });
       }
     }
+    if (!hasRspackFrontend) targets.push(...legacyCandidates);
 
-    // Rule 4: main process — force default features
-    const buildDir = path.join(SRC_DIR, plat, "_asar", ".vite", "build");
+    // Rule 4: main process 的原生 feature defaults 仍在旧构建布局中。
+    const buildDir = path.join(sourceDir, currentPlatform, "_asar", ".vite", "build");
     if (fs.existsSync(buildDir)) {
-      for (const f of fs.readdirSync(buildDir)) {
-        if (!f.startsWith("main-") || !f.endsWith(".js")) continue;
-        const fp = path.join(buildDir, f);
-        const src = fs.readFileSync(fp, "utf-8");
-        if (src.includes("externalBrowserUseAllowed") && src.includes("computerUse")) {
-          targets.push({ platform: plat, path: fp, rules: ["features"] });
+      for (const name of fs.readdirSync(buildDir)) {
+        if (!name.startsWith("main-") || !name.endsWith(".js")) continue;
+        const file = path.join(buildDir, name);
+        const source = fs.readFileSync(file, "utf-8");
+        if (source.includes("externalBrowserUseAllowed")
+          && source.includes("computerUse")) {
+          targets.push({
+            platform: currentPlatform,
+            path: file,
+            source,
+            kind: "legacy",
+            start: 0,
+            end: source.length,
+            rules: ["features"],
+          });
         }
       }
     }
   }
-
   return targets;
+}
+
+function patchTarget(target) {
+  let ast;
+  try {
+    ast = parse(target.source, { ecmaVersion: "latest", sourceType: "module" });
+  } catch (error) {
+    return { status: "parse-error", source: target.source, patches: [], error };
+  }
+
+  const patches = [];
+  if (target.rules.includes("auth")) {
+    patches.push(...findPluginAuthPatches(ast, target.source));
+  }
+  if (target.rules.includes("avail")) {
+    patches.push(...findBrowserAvailPatches(ast, target.source));
+  }
+  if (target.rules.includes("gate") || target.kind === "rspack") {
+    if (target.rules.includes("browser")) {
+      patches.push(...findStatsigGatePatches(ast, target.source));
+    }
+  }
+  if (target.rules.includes("features")) {
+    patches.push(...findFeatureDefaultPatches(ast, target.source));
+  }
+  if (target.rules.includes("goal")) {
+    patches.push(...findGoalGatePatches(ast, target.source));
+  }
+
+  const unique = patches.filter((patch, index) =>
+    patches.findIndex((other) => other.start === patch.start && other.end === patch.end) === index,
+  ).sort((left, right) => right.start - left.start);
+  let next = target.source;
+  for (const patch of unique) {
+    next = next.slice(0, patch.start) + patch.replacement + next.slice(patch.end);
+  }
+  try {
+    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+  } catch (error) {
+    return { status: "invalid-output", source: target.source, patches: unique, error };
+  }
+
+  const goalNative = target.rules.includes("goal")
+    && inspectNativeGoalGate(target.source);
+  return {
+    status: unique.length > 0 ? "patched" : "already-or-native",
+    source: unique.length > 0 ? next : target.source,
+    patches: unique,
+    goalNative,
+  };
+}
+
+function writeResults(patched, check) {
+  const byFile = new Map();
+  for (const entry of patched.filter(({ target }) => target.kind === "rspack")) {
+    const group = byFile.get(entry.target.path) || {
+      target: entry.target,
+      replacements: [],
+    };
+    group.replacements.push({
+      start: entry.target.start,
+      end: entry.target.end,
+      replacement: entry.result.source,
+    });
+    byFile.set(entry.target.path, group);
+  }
+  for (const group of byFile.values()) {
+    let next = group.target.chunkSource;
+    for (const replacement of group.replacements
+      .sort((left, right) => right.start - left.start)) {
+      next = next.slice(0, replacement.start)
+        + replacement.replacement
+        + next.slice(replacement.end);
+    }
+    parse(next, { ecmaVersion: "latest", sourceType: "module" });
+    if (!check) fs.writeFileSync(group.target.path, next, "utf-8");
+  }
+  for (const { target, result } of patched.filter((entry) => entry.target.kind === "legacy")) {
+    if (!check) fs.writeFileSync(target.path, result.source, "utf-8");
+  }
 }
 
 // ── Main ──
@@ -438,63 +723,126 @@ function locateTargets(platform) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
-  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
-
-  const targets = locateTargets(platform);
-
+  const platform = args.find((arg) => ["mac-arm64", "mac-x64", "win"].includes(arg));
+  let targets;
+  try {
+    targets = locateTargets(platform);
+  } catch (error) {
+    console.log(`[x] plugin auth target scan: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
   if (targets.length === 0) {
-    console.log("[ok] No plugin auth or browser-use targets found");
+    console.log("[x] No plugin auth, browser-use, or goal target found");
+    process.exitCode = 1;
     return;
   }
 
-  const seen = new Set();
-  const unique = targets.filter((t) => {
-    if (seen.has(t.path)) return false;
-    seen.add(t.path);
-    return true;
-  });
-
-  for (const bundle of unique) {
-    console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
-    const source = fs.readFileSync(bundle.path, "utf-8");
-    console.log(`   size: ${(source.length / 1024).toFixed(1)} KB`);
-
-    const t0 = Date.now();
-    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    console.log(`   parse: ${Date.now() - t0}ms`);
-
-    const patches = [];
-    if (bundle.rules.includes("auth")) patches.push(...findPluginAuthPatches(ast, source));
-    if (bundle.rules.includes("avail"))
-      patches.push(...findBrowserAvailPatches(ast, source));
-    if (bundle.rules.includes("gate"))
-      patches.push(...findStatsigGatePatches(ast, source));
-    if (bundle.rules.includes("features"))
-      patches.push(...findFeatureDefaultPatches(ast, source));
-    if (bundle.rules.includes("goal"))
-      patches.push(...findGoalGatePatches(ast, source));
-
-    if (patches.length === 0) {
-      console.log("   [ok] Already patched or no match");
+  const phases = new Map();
+  const completed = [];
+  let failed = 0;
+  let patchCount = 0;
+  for (const target of targets) {
+    const label = `${relPath(target.path)}${target.moduleId ? `#${target.moduleId}` : ""}`;
+    if (target.parseError) {
+      console.log(`[x] ${label}: ${target.parseError.message}`);
+      failed++;
+      continue;
+    }
+    const result = patchTarget(target);
+    if (result.status === "parse-error" || result.status === "invalid-output") {
+      console.log(`[x] ${label}: ${result.status}`);
+      failed++;
       continue;
     }
 
-    if (isCheck) {
-      for (const p of patches)
-        console.log(`   [?] [${p.id}] offset ${p.start}: ${p.original} -> ${p.replacement}`);
+    const current = phases.get(target.platform) || {
+      auth: false,
+      browser: false,
+      goal: false,
+    };
+    let recognized = true;
+    if (target.rules.includes("auth")) {
+      if (result.patches.some((patch) => patch.id === "plugin_auth_gate")
+        || target.source.includes(AUTH_MARKER)) {
+        current.auth = true;
+      } else {
+        recognized = false;
+      }
+    }
+    if (target.rules.includes("browser")) {
+      if (result.patches.some((patch) => patch.id.startsWith("statsig_gate_"))
+        || target.source.includes(BROWSER_MARKER)) {
+        current.browser = true;
+      } else {
+        recognized = false;
+      }
+    }
+    if (target.rules.includes("goal")) {
+      if (result.goalNative || result.patches.some((patch) => patch.id === "goal_gate_bypass")
+        || target.source.includes(GOAL_MARKER)) {
+        current.goal = true;
+      } else {
+        recognized = false;
+      }
+    }
+    phases.set(target.platform, current);
+
+    if (!recognized) {
+      console.log(`[x] ${label}: candidate found but gate structure is unrecognized`);
+      failed++;
       continue;
     }
-
-    patches.sort((a, b) => b.start - a.start);
-    let code = source;
-    for (const p of patches) {
-      console.log(`   * [${p.id}] offset ${p.start}: ${p.original} -> ${p.replacement}`);
-      code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
+    if (result.patches.length === 0) {
+      console.log(
+        `[ok] ${label}: ${result.goalNative ? "native goal chain verified" : "already patched"}`,
+      );
+      continue;
     }
-
-    fs.writeFileSync(bundle.path, code, "utf-8");
-    console.log(`   [ok] ${patches.length} gates patched`);
+    patchCount += result.patches.length;
+    completed.push({ target, result });
+    for (const patch of result.patches) {
+      console.log(
+        `[${isCheck ? "?" : "*"}] ${label} ${patch.id}: ${patch.original} -> ${patch.replacement}`,
+      );
+    }
   }
+
+  try {
+    writeResults(completed, isCheck);
+  } catch (error) {
+    console.log(`[x] plugin auth output: ${error.message}`);
+    failed++;
+  }
+
+  for (const currentPlatform of getPlatforms(platform, SRC_DIR)) {
+    const current = phases.get(currentPlatform) || {};
+    if (!current.auth) {
+      console.log(`[x] ${currentPlatform}: plugin auth gate was not recognized`);
+      failed++;
+    }
+    if (!current.browser) {
+      console.log(`[x] ${currentPlatform}: browser-use gate was not recognized`);
+      failed++;
+    }
+    if (!current.goal) {
+      console.log(`[x] ${currentPlatform}: goal native chain or legacy gate was not recognized`);
+      failed++;
+    }
+  }
+  console.log(`[done] ${isCheck ? "would patch" : "patched"} ${patchCount} plugin/browser/goal gate(s)`);
+  if (failed > 0) process.exitCode = 1;
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = {
+  AUTH_MARKER,
+  BROWSER_MARKER,
+  GOAL_MARKER,
+  findPluginAuthPatches,
+  findStatsigGatePatches,
+  inspectNativeGoalGate,
+  locateTargets,
+  patchTarget,
+};

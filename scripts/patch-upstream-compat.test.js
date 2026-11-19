@@ -10,9 +10,12 @@ const {
   OLD_COPYRIGHT_HTML,
   collectPatches: collectCopyrightPatches,
 } = require("./patch-copyright");
+const { patchSource: patchI18n } = require("./patch-i18n");
 const {
-  hasNativeWorkspaceRootPropagation,
-} = require("./patch-composer-workspace-root");
+  findPluginAuthPatches,
+  findStatsigGatePatches,
+  inspectNativeGoalGate,
+} = require("./patch-plugin-auth");
 const { hasNativeArchiveDelete } = require("./patch-archive-delete");
 const {
   isElectronBootstrap,
@@ -26,11 +29,6 @@ const {
 const {
   patchSource: patchDiffLimits,
 } = require("./patch-diff-limits");
-const {
-  TARGETS,
-  hasNativeScopeProtection,
-  patchOne: patchSentryFile,
-} = require("./patch-sentry-scope");
 const { isOwlRuntime } = require("./build-from-upstream");
 
 function applyPatches(source, patches) {
@@ -50,46 +48,116 @@ test("版权补丁兼容新版 About HTML", () => {
   assert.equal(applyPatches(source, patches).includes(NEW_COPYRIGHT_HTML), true);
 });
 
-test("识别上游原生工作区根目录传递链路", () => {
-  const primarySource = [
-    "function Qut({localConversationCwd:e,selectedRemoteProjectPath:t,defaultCwd:n,workspaceRoots:r,activeWorkspaceRoot:i,codexHome:a,canUseProjectlessThreads:o}){return e||t||n||r[0]||i}",
-  ].join("");
-  const sharedSource = "const query=`active-workspace-roots`;";
+test("i18n 改写保留可重入的 enable_i18n 标记", () => {
+  const source = 'const value=provider?.get("enable_i18n",!1);';
+  const result = patchI18n(source);
 
+  assert.equal(result.status, "patched");
+  assert.match(result.source, /\/\* Codex：启用界面语言 enable_i18n \*\/!0/);
+  assert.equal(patchI18n(result.source).status, "already-patched");
+  assert.equal(patchI18n('const text="enable_i18n";').status, "unrecognized-gate");
+});
+
+test("插件 query 认证、序列成员浏览器 gate 与原生 goal 链可分别识别", () => {
+  const authSource = [
+    'const query={queryFn:async()=>{if(await (0,d.s)(scope,host)!=="chatgpt")return empty;',
+    'return request("/ps/plugins/list")}};',
+  ].join("");
+  const authAst = parse(authSource, { ecmaVersion: "latest", sourceType: "module" });
+  assert.equal(findPluginAuthPatches(authAst, authSource).length, 1);
+  const callSiteOnly = 'function query(){return request("/ps/plugins/list",{label:"chatgpt"})}';
   assert.equal(
-    hasNativeWorkspaceRootPropagation(primarySource, sharedSource),
-    true,
+    findPluginAuthPatches(
+      parse(callSiteOnly, { ecmaVersion: "latest", sourceType: "module" }),
+      callSiteOnly,
+    ).length,
+    0,
   );
+
+  const browserSource = [
+    'function availability(){let gate=(0,h.Zj)("410262010");',
+    'return{enabled:gate,featureName:"browser_use"}}',
+  ].join("");
+  const browserAst = parse(browserSource, { ecmaVersion: "latest", sourceType: "module" });
+  assert.equal(findStatsigGatePatches(browserAst, browserSource).length, 1);
+
+  const goalSource = [
+    'function rg(e,t){return"cloud"!==t&&("local"!==e.kind||"side"!==e.placement)}',
+    "function Composer(){const value=state();const t=rg(value,mode);let eO=t;let enabled=eO&&visible;",
+    'return{id:"composer.goalSlashCommand",enabled}}',
+  ].join("");
+  assert.equal(inspectNativeGoalGate(goalSource), true);
   assert.equal(
-    hasNativeWorkspaceRootPropagation(
-      primarySource.replace("activeWorkspaceRoot:", "root:"),
-      sharedSource,
-    ),
+    inspectNativeGoalGate(goalSource.replace("enabled}}", "available}}")),
     false,
   );
 });
 
 test("识别上游原生归档会话删除功能", () => {
-  const source = [
-    "delete-archived-conversation",
-    "delete-all-archived-conversations",
-    "showDeleteButton",
-    "settings.dataControls.archivedChats.deleteConfirm.title",
-    "thread/delete",
-  ].join("|");
+  const dataControls = [
+    "function DataControls(manager,ui){",
+    "const [pending,setPending]=useState(null);",
+    "const run=async target=>target.kind===`all`?manager.deleteAllArchivedConversations():manager.deleteArchivedConversation(target.thread.id);",
+    "const mutationConfig={mutationKey:[`delete-archived-conversations`],mutationFn:run};",
+    "const mutation=useMutation(mutationConfig);const confirm=()=>{if(pending){setPending(null);mutation.mutate(pending)}};",
+    "return ui(Dialog,{onConfirm:confirm,children:ui(Group,{onDelete:thread=>setPending({kind:`single`,thread})})});}",
+    "function Group(input){const {onDelete:openDelete}=input;",
+    "return ui(Row,{showDeleteButton:!0,onDelete:()=>openDelete(thread)})}",
+    "function Row(input){const {showDeleteButton:show,onDelete:remove}=input;",
+    "return show?button({onClick:()=>remove()}):null}",
+  ].join("");
+  const protocol = [
+    "class Manager{deleteArchivedConversation(id){return this.runtime.deleteArchivedThreads(`local`,id)}",
+    "deleteAllArchivedConversations(){return this.runtime.deleteArchivedThreads(`local`)}}",
+    "const runtime={async deleteArchivedThreads(host,id){let service=this.threadArchive;",
+    "return id==null?await service.deleteAllArchivedThreads({hostId:host}):await service.deleteArchivedThread({hostId:host,threadId:id})}};",
+    "async function deleteOne(appServer,id){return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})}",
+    "function notification(event,manager){if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])}",
+  ].join("");
 
-  assert.equal(hasNativeArchiveDelete(source), true);
-  assert.equal(hasNativeArchiveDelete(source.replace("thread/delete", "thread/archive")), false);
-
-  const currentSource = [
-    "delete-archived-conversation",
-    "delete-archived-conversations",
-    "deleteArchivedConversation",
-    "deleteAllArchivedConversations",
-    "showDeleteButton",
-    "thread/delete",
-  ].join("|");
-  assert.equal(hasNativeArchiveDelete(currentSource), true);
+  assert.equal(hasNativeArchiveDelete(dataControls, protocol), true);
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:thread=>setPending", "onDelete:thread=>noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace("thread/delete", "thread/archive")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onConfirm:confirm", "onCancel:confirm"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("onDelete:()=>openDelete(thread)", "onDelete:noop"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls.replace("mutation.mutate(pending)", "mutation.mutate(other);void pending"), protocol),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.runtime.archiveThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replaceAll("this.runtime.deleteArchivedThreads", "this.dead.deleteArchivedThreads")),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "return appServer.sendAppServerRequest(`thread/delete`,{threadId:id})",
+      "void `thread/delete`;return appServer.sendAppServerRequest(`thread/archive`,{threadId:id})",
+    )),
+    false,
+  );
+  assert.equal(
+    hasNativeArchiveDelete(dataControls, protocol.replace(
+      "if(event.method===`thread/deleted`)manager.handleThreadDeletion([event.params.threadId])",
+      "if(event.method===`thread/deleted`){noop()}else{manager.handleThreadDeletion([event.params.threadId])}",
+    )),
+    false,
+  );
 });
 
 test("主进程入口兼容 bootstrap 与哈希 main 文件", () => {
@@ -153,38 +221,6 @@ test("diff 上限按数值结构匹配，不依赖压缩变量名", () => {
   assert.equal(result.status, "patched");
   assert.match(result.source, /Z2=8\*1024\*1024/);
   assert.equal(patchDiffLimits(result.source).status, "already-patched");
-});
-
-test("Sentry 补丁覆盖新版主进程 chunk 并保持幂等", () => {
-  assert.equal(TARGETS[1].test("window-all-closed-abc.js"), true);
-  assert.equal(TARGETS[1].test("workspace-root-drop-handler-abc.js"), true);
-
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sentry-test-"));
-  const file = path.join(directory, "window-all-closed-test.js");
-  try {
-    fs.writeFileSync(file, "const options={dsn:config.dsn,environment:config.env};");
-    assert.equal(patchSentryFile(file, false), true);
-    const patched = fs.readFileSync(file, "utf-8");
-    assert.match(patched, /maxBreadcrumbs:20/);
-    assert.equal(patchSentryFile(file, false), false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("识别上游原生 Sentry scope 防膨胀保护", () => {
-  const source = [
-    "const codex_truncated_breadcrumb_data=true;",
-    "Sentry.init({beforeBreadcrumb:trim});",
-    "const scope=`scope_v3.json`;",
-    "const maxBytes=2097152;",
-  ].join("");
-
-  assert.equal(hasNativeScopeProtection(source), true);
-  assert.equal(
-    hasNativeScopeProtection(source.replace("scope_v3.json", "scope.json")),
-    false,
-  );
 });
 
 test("识别新版 Windows Owl runtime", () => {

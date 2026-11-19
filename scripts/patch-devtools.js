@@ -14,7 +14,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildFeatureBundles, relPath } = require("./patch-util");
 
 // ──────────────────────────────────────────────
 //  AST walker
@@ -85,10 +85,10 @@ function main() {
   const isCheck = args.includes("--check");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main(-[^.]+)?\.js$/,
+  const bundles = locateBuildFeatureBundles({
     platform,
+    label: "DevTools",
+    match: code => code.includes("allowInspectElement:") && code.includes("allowDevtools") && code.includes("devTools:"),
   });
 
   if (bundles.length === 0) {
@@ -107,8 +107,14 @@ function main() {
 
     const patches = [];
     const seen = new Set();
+    const coverage = new Set();
 
     walkAST(ast, (node, parent) => {
+      if (node.type === "Property" && parent?.type !== "ObjectPattern") {
+        const name = getPropertyName(node.key);
+        if (name === "allowInspectElement") coverage.add(name);
+        if (name === "devTools" && (/allowDevtools|allowDevTools/.test(source.slice(node.value.start, node.value.end)) || source.slice(node.value.start, node.value.end) === "!0")) coverage.add(name);
+      }
       for (const rule of RULES) {
         const result = rule.match(node, source, parent);
         if (!result) continue;
@@ -119,8 +125,9 @@ function main() {
       }
     });
 
+    if (coverage.size !== 2) throw new Error("DevTools: missing required AST property anchors");
     if (patches.length === 0) {
-      console.log("   [ok] DevTools already enabled or no match");
+      console.log("   [ok] DevTools already enabled");
       continue;
     }
 

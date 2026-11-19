@@ -11,7 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildFeatureBundles, relPath } = require("./patch-util");
 
 // ──────────────────────────────────────────────
 //  Config
@@ -88,15 +88,16 @@ function collectPatches(ast, source) {
   });
 
   // 26.803 起 About 面板改成自定义 HTML，不再调用 setAboutPanelOptions。
-  let offset = 0;
-  while ((offset = source.indexOf(OLD_COPYRIGHT_HTML, offset)) !== -1) {
+  const htmlPattern = /<div class="copyright">(?:©|\\x[aA]9|\\u00[aA]9) OpenAI<\/div>/g;
+  let match;
+  while ((match = htmlPattern.exec(source)) !== null) {
+    const offset = match.index;
     patches.push({
       start: offset,
-      end: offset + OLD_COPYRIGHT_HTML.length,
-      replacement: NEW_COPYRIGHT_HTML,
-      original: OLD_COPYRIGHT_HTML,
+      end: offset + match[0].length,
+      replacement: match[0].replace(" OpenAI", " OpenAI · Cometix Space"),
+      original: match[0],
     });
-    offset += OLD_COPYRIGHT_HTML.length;
   }
 
   return patches;
@@ -111,10 +112,10 @@ function main() {
   const isCheck = args.includes("--check");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main(-[^.]+)?\.js$/,
+  const bundles = locateBuildFeatureBundles({
     platform,
+    label: "About copyright",
+    match: code => /<div class="copyright">(?:©|\\x[aA]9|\\u00[aA]9) OpenAI/.test(code) || /copyright:["'`]© OpenAI/.test(code),
   });
 
   if (bundles.length === 0) {
@@ -135,13 +136,15 @@ function main() {
 
     if (patches.length === 0) {
       // Check if already patched
-      if (source.includes(NEW_COPYRIGHT)) {
+      if (source.includes(NEW_COPYRIGHT) || /<div class="copyright">(?:\\x[aA]9|\\u00[aA]9) OpenAI · Cometix Space<\/div>/.test(source)) {
         console.log("   [ok] Already patched");
       } else {
-        console.log("   [!] No copyright property matched");
+        throw new Error("About copyright: no required copyright anchor matched");
       }
       continue;
     }
+
+    if (patches.length !== 1) throw new Error(`About copyright: expected exactly 1 anchor, found ${patches.length}`);
 
     if (isCheck) {
       console.log(`   [?] Matches: ${patches.length}`);

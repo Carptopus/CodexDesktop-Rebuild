@@ -1,0 +1,151 @@
+name: Windows Candidate
+
+on:
+  push:
+    branches: [master, 'maintenance/**', 'candidate/**']
+    paths-ignore: ['**/*.md']
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Exact available Windows MSIX version; blank selects newest x64'
+        type: string
+      source_run_id:
+        description: 'Reuse verified Windows-Source artifact from this repository run'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-candidate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  candidate:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.14.1'
+          cache: pnpm
+      - name: Install tooling without native builds or Electron download
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Syntax and upstream regression checks
+        run: |
+          pnpm check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:maintenance
+      - name: Use runner 7-Zip
+        run: |
+          $sevenZip = 'C:\Program Files\7-Zip'
+          if (-not (Test-Path -LiteralPath "$sevenZip\7z.exe")) { throw 'Runner 7-Zip missing' }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Restore last successfully constructed candidate observation
+        id: observation
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/observed-candidate.json
+          key: windows-observed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            windows-observed-${{ github.sha }}-
+      - name: Download fixed upstream source for a replay
+        if: github.event_name == 'workflow_dispatch' && inputs.source_run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+          name: Windows-Source
+          path: artifacts/replay
+      - name: Read current stable source for daily comparison
+        if: github.event_name == 'schedule' && steps.observation.outputs.cache-matched-key == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read releases' }
+          $stable = $releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -like 'win-*' } | Select-Object -First 1
+          if ($stable) {
+            New-Item -ItemType Directory -Path artifacts/stable -Force | Out-Null
+            gh release download $stable.tag_name --repo $env:GITHUB_REPOSITORY --pattern candidate.json --dir artifacts/stable
+            if ($LASTEXITCODE -ne 0) { throw 'Stable source record missing' }
+          }
+      - name: Discover official Windows package
+        id: discover
+        if: github.event_name != 'pull_request' && (inputs.source_run_id == '' || github.event_name != 'workflow_dispatch')
+        env:
+          REQUESTED_VERSION: ${{ inputs.upstream_version }}
+        run: |
+          $arguments = @('scripts/windows-maintenance.js', 'discover', '--out', '.cache/windows-discovery.json')
+          if ($env:REQUESTED_VERSION) { $arguments += @('--version', $env:REQUESTED_VERSION) }
+          if (Test-Path .cache/observed-candidate.json) { $arguments += @('--stable-manifest', '.cache/observed-candidate.json') }
+          elseif (Test-Path artifacts/stable/candidate.json) { $arguments += @('--stable-manifest', 'artifacts/stable/candidate.json') }
+          node @arguments
+      - name: Build and verify fixed Windows candidate
+        if: github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        run: |
+          $arguments = @('scripts/windows-maintenance.js', 'candidate')
+          if (Test-Path artifacts/replay/upstream.json) { $arguments += @('--source', 'artifacts/replay/upstream.json') }
+          else { $arguments += @('--discovery', '.cache/windows-discovery.json') }
+          node @arguments
+      - name: Patch reports, including failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Windows-Patch-Reports
+          path: patch-reports/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Candidate ZIP and provenance
+        if: success() && github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        uses: actions/upload-artifact@v7
+        with:
+          name: Windows-Candidate
+          path: |
+            artifacts/candidate/*
+            !artifacts/candidate/*.msix
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Small verification records for local review
+        if: success() && github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        uses: actions/upload-artifact@v7
+        with:
+          name: Windows-Verification
+          path: |
+            artifacts/candidate/*.json
+            artifacts/candidate/SHA256SUMS.txt
+          retention-days: 7
+          if-no-files-found: error
+      - name: Original MSIX for replay and local archive
+        if: success() && github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        uses: actions/upload-artifact@v7
+        with:
+          name: Windows-Source
+          path: |
+            artifacts/candidate/*.msix
+            artifacts/candidate/upstream.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Save successful candidate observation without modifying master
+        if: success() && github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        run: Copy-Item -LiteralPath artifacts/candidate/candidate.json -Destination .cache/observed-candidate.json
+      - name: Cache last constructed source version
+        if: success() && github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.discover.outputs.has_update == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/observed-candidate.json
+          key: windows-observed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
