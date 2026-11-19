@@ -126,7 +126,20 @@ async function main() {
   };
   bind(binding("auth").callee, () => state.auth);
   bind(binding("usage").callee, value => { assert.equal(value, atom); state.reads++; return { data: state.usage }; });
-  bind(binding("intl").callee, () => ({ locale: state.locale, formatNumber: (number, options) => new Intl.NumberFormat(state.locale, options).format(number) }));
+  const resetMessages = Object.fromEntries(Object.entries({
+    resetsInDuration: "{duration} 后重置",
+    resetsInDaysHours: "{days} 天 {hours} 小时后重置",
+    resetsInHoursMinutes: "{hours} 小时 {minutes} 分钟后重置",
+    resetsInMinutes: "{minutes} 分钟后重置",
+    resetsNow: "立即重置",
+  }).map(([key, message]) => [`settings.usage.personalLimits.${key}`, message]));
+  bind(binding("intl").callee, () => ({
+    locale: state.locale, defaultLocale: "en-US", messages: state.locale === "zh-CN" ? resetMessages : {},
+    formatNumber: (number, options) => new Intl.NumberFormat(state.locale, options).format(number),
+    formatMessage: ({ id, defaultMessage }, values = {}) =>
+      ((state.locale === "zh-CN" ? resetMessages[id] : null) ?? defaultMessage)
+        .replace(/\{(\w+)\}/g, (_, key) => values[key]),
+  }));
   const usageReference = binding("usage").arguments[0];
   if (usageReference.type === "MemberExpression" && usageReference.object.type === "CallExpression") {
     context[usageReference.object.callee.name] = id => {
@@ -195,6 +208,28 @@ async function main() {
   assert.equal(percentage.props.style.fontWeight, 500);
   assert.ok(percentage.props.style.fontSize >= 13);
   assert.match(tree.props.title, /每周: 81%/);
+  // 直接执行生成的悬停回调，同一份额度数据也应按当前时刻重新计算。
+  const resetAt = state.usage.rate_limit.primary_window.reset_at;
+  const originalNow = Date.now;
+  const hover = tree.props.onMouseEnter;
+  try {
+    const target = { title: tree.props.title };
+    for (const [secondsLeft, expected] of [
+      [122_400, "1天10小时后重置"], [5_700, "1小时35分钟后重置"],
+      [3_600, "1小时0分钟后重置"], [121, "3分钟后重置"],
+      [1, "1分钟后重置"], [0, "立即重置"], [-60, "立即重置"],
+    ]) {
+      Date.now = () => (resetAt - secondsLeft) * 1000;
+      hover({ currentTarget: target });
+      assert.equal(target.title.replace(/\s/g, ""), `每周:81%，${expected}`);
+    }
+    assert.equal(state.reads, 1, "悬停刷新倒计时无需重新查询额度");
+    state.usage.rate_limit.secondary_window = { used_percent: 80, limit_window_seconds: 18000 };
+    assert.equal(render().props.title, "每周: 81%，立即重置\n5 小时: 20%");
+  } finally {
+    Date.now = originalNow;
+    delete state.usage.rate_limit.secondary_window;
+  }
   for (const node of nodes(nativeButton.arguments[1], node => node.type === "Identifier")) {
     if (!(node.name in context)) context[node.name] = null;
   }
