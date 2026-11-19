@@ -42,7 +42,6 @@ pnpm run build:all
 
 - `src/<platform>/_asar` 是 ASAR 内资源的补丁目标。
 - `src/<platform>/plugins` 与 `src/<platform>/cua_node` 是 Browser / Computer Use 等外置运行时的补丁目标；直打包流程会显式覆盖这两个目录，避免重新复制上游安装包缓存时丢失补丁。
-- `patch-browser-auth.js` 兼容 API-key 登录：旧版在 ChatGPT 身份读取失败时仅关闭可选 request-header 并继续本地浏览器通道；新版原生托管请求头不再依赖 ChatGPT 身份时验证该完整链路并保持原样，不会把 API key 伪装或发送为 ChatGPT token。
 - `patch-fast-mode.js` 为 API-key / 自定义 Provider 补齐新版 `serviceTierAccess`：跳过不可用的 ChatGPT 账户权限查询，但仍由当前模型返回的 `serviceTierOptions` 决定是否显示和发送 Fast / Ultrafast 档位。
 - `patch-provider-quota.js` 按任务实际 Provider 和明确的 `base_url` 判断发送门槛，避免 ChatGPT 额度状态误阻断第三方 Provider，同时保留官方、云任务及第三方真实错误。
 - `patch-api-key-home-navigation.js` 补齐 API-key 模式的当前会话导航记录，并在官方公共首页恢复函数中复用当前位置短路；当前会话点击首页保持不变，从设置等页面点击首页则恢复最近会话，避免直达空首页。ChatGPT、无认证、其他认证方式及非首页区域保持原有条件。
@@ -56,7 +55,6 @@ pnpm run build:all
 - `patch-reading-layout.js` 在外观主题卡片中加入 50%–100%、步进 5% 的正文宽度滑杆，并同步代码块、表格和输入区宽度，扩宽适用对话框；百分比不低于官方宽度，Markdown 粗体颜色可跟随正文、强调色或使用自定义颜色。
 - `patch-rebuild-settings.js` 将正文宽度、Markdown 粗体颜色和本地强调色预设保存到 `CODEX_HOME/codex-rebuild-settings.json`，独立于程序目录与浏览器 User Data；通过限定的可信 IPC 读取和保存，不读取或迁移旧 localStorage。官方账户主题仍由官方管理。
 - `patch-test-isolation.js` 在官方设置 User Data 后、获取单实例锁前挂载 Windows 验收隔离，分别约束 `CODEX_HOME`、User Data 和 sessionData，并记录实际启动路径证据。
-- `patch-model-picker-submenu.js` 增加对新版原生 simple / advanced 内联模型列表的结构核验；官方实现完整时保持原样，旧结构继续适配，未知结构明确失败。
 - `patch-thread-file-manager-action.js` 将系统文件管理器入口提升到会话菜单顶层，复用官方工作区打开回调，保留最新工作树解析及失败提示，不覆盖默认编辑器偏好；按菜单内容识别所在 Bundle，支持新版菜单迁移。
 - `patch-thread-copy-markdown.js` 修复未打开会话时 Markdown 复制可能为空的问题，仅在复制操作中加载完整历史，并在需要时复用官方快照及渲染器；不改变日常会话恢复和分页。
 - `patch-archive-delete.js` 让归档列表明确查询全部 Provider，避免切换 Provider 后旧归档被隐藏；新版上游已有原生删除链路时保持原样，旧版才补充永久删除入口。
@@ -88,7 +86,7 @@ pnpm run dev
 │   └── notification.wav # Sound
 ├── scripts/
 │   ├── patch-all.js
-│   └── patch-browser-auth.js
+│   └── patch-policy.js
 ├── forge.config.js      # Electron Forge config
 └── package.json
 ```

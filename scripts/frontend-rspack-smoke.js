@@ -283,8 +283,7 @@ function verifyMcp(target) {
     .sort((left, right) => left.end - left.start - (right.end - right.start))[0];
   const branchText = text(source, branch);
   const readiness = /\b([A-Za-z_$][\w$]*)&&\(([A-Za-z_$][\w$]*)\?\.\(\)\?\?!0\)/.exec(branchText);
-  const inventory = /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*);\2=!1/.exec(branchText);
-  const helper = /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)/.exec(branchText);
+  const helper = /__codexReady&&([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)?\)/.exec(branchText);
   const threadSet = /([A-Za-z_$][\w$]*)\.add\(/.exec(branchText)?.[1];
   const helperImport = /\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(n\.params\.name\)/
     .exec(branchText);
@@ -294,12 +293,14 @@ function verifyMcp(target) {
     .exec(branchText)?.[1];
   const refresh = /\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*)\.queryClient,\{queryKey:\[\.\.\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),`toolsAndAuthOnly`\]/
     .exec(branchText);
-  assert.ok(readiness && inventory && helper && threadSet && helperImport &&
+  const globalHelper = /\.params\.status&&([A-Za-z_$][\w$]*)\(\(0,/.exec(branchText);
+  assert.ok(readiness && helper && threadSet && helperImport && globalHelper &&
     inventoryState && readyTimer && threadTimer && refresh);
   const calls = [], timers = [];
+  const recordInventory = name => calls.push(["inventory", name]);
   const context = vm.createContext({
-    [readiness[1]]: true, [inventory[2]]: false, [inventory[1]]: false,
-    [helper[1]]: name => calls.push(["inventory", name]), [threadSet]: new Set(),
+    [readiness[1]]: true, [helper[1]]: recordInventory, [globalHelper[1]]: recordInventory,
+    [threadSet]: new Set(),
     [readiness[2]]: () => true, __codexMcpThreadReadyPending: false,
     [helperImport[1]]: { [helperImport[2]]: name => name },
     [refresh[4]]: { [refresh[5]]: ["mcp"] },
@@ -325,6 +326,9 @@ function verifyMcp(target) {
   assert.equal(timers.filter(timer => timer.delay === 250).length, 1);
   assert.equal(timers.filter(timer => timer.delay === 0).length, 1);
   timers.find(timer => timer.delay === 250).callback();
+  assert.deepEqual(calls.filter(call => call[0] === "inventory"), [
+    ["inventory", "plugin"], ["inventory", helper[2] ? "plugin" : undefined],
+  ]);
   assert.equal(calls.filter(call => call[1]?.queryKey?.at(-1) === "toolsAndAuthOnly").length, 1);
   const full = calls.find(call => call[1]?.refetchType === "none")[1];
   assert.equal(full.predicate({ queryKey: ["mcp", "local", "full"] }), true);
@@ -648,4 +652,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { moduleIndex, verifyRspackFrontend };
+module.exports = { moduleIndex, verifyMcp, verifyRspackFrontend };

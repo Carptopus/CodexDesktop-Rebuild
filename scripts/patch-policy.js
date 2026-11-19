@@ -31,13 +31,10 @@ const PATCH_POLICY = [
   { script: "patch-sidebar-usage.js", feature: "侧栏常驻剩余额度圆环" },
   { script: "patch-reading-layout.js", feature: "可配置正文宽度与排版" },
   { script: "patch-model-catalog-filter.js", feature: "模型目录过滤" },
-  { script: "patch-model-picker-submenu.js", feature: "模型选择器子菜单" },
   { script: "patch-thread-file-manager-action.js", feature: "会话文件管理器入口" },
   { script: "patch-thread-copy-markdown.js", feature: "未打开会话的完整 Markdown 复制" },
-  { script: "patch-browser-auth.js", feature: "API-key 浏览器认证" },
   { script: "patch-plugin-auth.js", feature: "插件认证与功能开关" },
   { script: "patch-remote-control.js", feature: "Remote Control 认证隔离" },
-  { script: "patch-composer-workspace-root.js", feature: "会话工作目录传递" },
   { script: "patch-updater.js", feature: "禁用上游自动更新" },
   { script: "patch-archive-delete.js", feature: "跨 Provider 归档列表与归档删除" },
   { script: "patch-crash-forensics.js", feature: "主进程崩溃诊断" },
@@ -45,7 +42,6 @@ const PATCH_POLICY = [
   { script: "patch-worker-limits.js", feature: "Worker 内存限制" },
   { script: "patch-diff-limits.js", feature: "Diff 输出限制" },
   { script: "patch-git-output-cap.js", feature: "Git 输出限制" },
-  { script: "patch-sentry-scope.js", feature: "Sentry 内存保护" },
   { script: "patch-cdp-screenshot.js", feature: "浏览器截图管线" },
 ];
 

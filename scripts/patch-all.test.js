@@ -111,18 +111,16 @@ test("版权结构缺失只报告警告，后续必要补丁仍实际生效", (t
 
 test("必要补丁漂移时阻止构建，失败日志仍写入报告", (t) => {
   const root = fixture(t);
-  const source = 'async function readGate(){throw new Error("Browser request-header policy requires caller identity.");checkGate("codex_browser_use_agent_request_header")}';
-  const file = path.join(root, "win", "plugins", "browser", "browser-service.mjs");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, source);
+  const source = 'const labels=["codex.profileFooter.showPet","codex.profileFooter.hidePet","codex.profileFooter.showMini","codex.profileFooter.hideMini"];';
+  const file = write(root, "webview/assets/profile-dropdown-items-test.js", source);
   const reportDir = path.join(root, "report");
 
-  const report = runPatches({ platform: "win", sourceDir: root, check: true, reportDir, policy: policy("patch-browser-auth.js"), log: () => {} });
+  const report = runPatches({ platform: "win", sourceDir: root, check: true, reportDir, policy: policy("patch-hide-pet-menu.js"), log: () => {} });
   assert.equal(report.canBuild, false);
   assert.equal(fs.readFileSync(file, "utf8"), source);
   const saved = JSON.parse(fs.readFileSync(path.join(reportDir, "report.json")));
   assert.equal(saved.results[0].status, "failed");
-  assert.match(fs.readFileSync(path.join(reportDir, saved.results[0].logFile), "utf8"), /unexpected-shape/);
+  assert.match(fs.readFileSync(path.join(reportDir, saved.results[0].logFile), "utf8"), /Pet 菜单资源数量异常（0）/);
 });
 
 test("CLI 缺少同步资源时返回失败并生成可读报告", (t) => {
@@ -152,19 +150,19 @@ test("报告合并正常扫描提示，并阻止缺少必要补丁目标", (t) =
   const reportDir = path.join(root, "report");
   const report = runPatches({
     platform: "mac-arm64", sourceDir: root, check: true, reportDir,
-    policy: policy("patch-windows-portable-runtime.js", "patch-model-picker-submenu.js"),
+    policy: policy("patch-windows-portable-runtime.js", "patch-hide-pet-menu.js"),
     log: () => {},
   });
 
   assert.equal(report.canBuild, false);
   assert.equal(report.reviewCount, 0);
   assert.equal(report.results.find((item) => item.script === "patch-windows-portable-runtime.js").noticeSummary[0].kind, "info");
-  assert.equal(report.results.find((item) => item.script === "patch-model-picker-submenu.js").status, "failed");
+  assert.equal(report.results.find((item) => item.script === "patch-hide-pet-menu.js").status, "failed");
 
   const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   // A required patch with no verifiable target must block the build.
-  const submenuRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-model-picker-submenu.js"));
-  assert.match(submenuRow, /失败，阻止构建/);
+  const petRow = markdown.split("\n").find((line) => line.startsWith("|") && line.includes("patch-hide-pet-menu.js"));
+  assert.match(petRow, /失败，阻止构建/);
   const infoLines = markdown.split("\n").filter((line) => line.startsWith("- ") && line.includes("patch-windows-portable-runtime.js"));
   assert.equal(infoLines.length, 1);
   assert.equal(renderReport(report, { linkLogs: false }).includes("]("), false);

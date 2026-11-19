@@ -10,7 +10,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { parse } = require("acorn");
 const { frontendFiles, isRspackFrontend, findFrontendModules, replaceFrontendModule } = require("./rspack-util");
-const { literal: staticValue, walk } = require("./patch-ast-util");
+const { literal: staticValue, nodes, walk } = require("./patch-ast-util");
 const { relPath, SRC_DIR } = require("./patch-util");
 
 const MARKER = "/* CodexRebuildMcpStatusRefresh */";
@@ -289,6 +289,35 @@ function targetDirectories(platform) {
   })).filter((item) => fs.existsSync(item.path));
 }
 
+function verifyRspackInventory(source, owner, inventory, globalReady) {
+  const inventoryCall = globalReady?.type === "LogicalExpression" && globalReady.operator === "&&" ? globalReady.right : null;
+  if (inventoryCall?.type !== "CallExpression" || inventoryCall.callee.type !== "Identifier" || inventoryCall.arguments.length !== 1) {
+    throw new Error("Rspack MCP 全局 inventory 调用漂移");
+  }
+  const binding = name => {
+    const matches = nodes(owner.body, node => node.type === "VariableDeclarator" && node.id.name === name, { ownScope: true });
+    if (matches.length !== 1) throw new Error("Rspack MCP inventory helper 缺失或不唯一");
+    return matches[0].init;
+  };
+  const directName = inventoryCall.callee.name;
+  const direct = binding(directName);
+  const directText = source.slice(direct?.start, direct?.end);
+  if (direct?.type !== "ArrowFunctionExpression" || !["installed-inventory", "installed"].every(term => directText.includes(term))) {
+    throw new Error("Rspack MCP inventory helper 结构漂移");
+  }
+  if (inventory.callee.name === directName && inventory.arguments.length === 1) return;
+
+  // 新版在会话就绪的 inventory 刷新外加了防抖。保留该调用及原取消逻辑。
+  const deferred = binding(inventory.callee.name);
+  const callback = deferred?.arguments?.[0];
+  if (inventory.arguments.length !== 0 || deferred?.type !== "CallExpression" || callback?.type !== "ArrowFunctionExpression" ||
+      deferred.arguments.length !== 2 || !(staticValue(deferred.arguments[1]) > 0) ||
+      nodes(callback.body, node => node.type === "CallExpression" && node.callee.name === directName && node.arguments.length === 1).length !== 1 ||
+      nodes(owner.body, node => node.type === "CallExpression" && propertyName(node.callee) === "cancel" && node.callee.object.name === inventory.callee.name).length !== 1) {
+    throw new Error("Rspack MCP inventory 防抖结构漂移");
+  }
+}
+
 function patchRspackSource(source) {
   if (source.includes(MARKER)) { validatePatchedSource(source); return { status: "already-patched", source }; }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -313,9 +342,6 @@ function patchRspackSource(source) {
   const queryKey = objectProperty(mention.arguments[1], "queryKey")?.value;
   if (inventory.type !== "CallExpression" || inventory.callee.type !== "Identifier" || queryKey?.elements.length !== 3
     || queryKey.elements[0]?.type !== "SpreadElement" || queryKey.elements[1]?.type !== "Identifier") throw new Error("Rspack MCP 目录调用漂移");
-  const helpers = [];
-  walk(ast, node => { if (node.type === "VariableDeclarator" && node.id.name === inventory.callee.name) helpers.push(node); });
-  if (helpers.length !== 1 || !["installed-inventory", "installed"].every(term => text(helpers[0]).includes(term))) throw new Error("Rspack MCP inventory helper 缺失");
   const queryClient = text(mention.arguments[0]), base = text(queryKey.elements[0].argument), host = text(queryKey.elements[1]);
   const refresh = `(${text(mention.callee)})`;
   const light = `${refresh}(${queryClient},{queryKey:[...${base},${host},\`toolsAndAuthOnly\`],exact:!0},{cancelRefetch:!1})`;
@@ -324,8 +350,10 @@ function patchRspackSource(source) {
   walk(ast, node => { if (node.type === "FunctionDeclaration" && node.start < branch.start && node.end > branch.end) owner.push(node); });
   const fn = owner.sort((a,b) => a.end-a.start-(b.end-b.start))[0];
   if (!fn || scoped.type !== "ConditionalExpression" || !text(scoped.consequent).includes(`queryKey:[...${base},${host}]`)) throw new Error("Rspack MCP 全局刷新漂移");
+  verifyRspackInventory(source, fn, inventory, ready.alternate);
   const readyCapture = ready.consequent.expressions[0];
-  const replacement = `(${text(ready.test)}||${text(scoped.test)})&&(${text(ready.test)}&&(__codexMcpThreadReadyPending=!0,${text(readyCapture)}),${text(assignment.left)}??=setTimeout(()=>{${text(assignment.left)}=void 0;let __codexReady=__codexMcpThreadReadyPending;__codexMcpThreadReadyPending=!1;${text(callback.body.body[1])}${text(work.expressions[0])};${text(guarded.left)}&&(${light},__codexReady&&${text(inventory)},${text(mention)},${full})},${REFRESH_DELAY_MS})),${notification}.params.threadId==null&&(${text(ready.alternate)}),${text(scoped.alternate)}`;
+  const callbackPrefix = source.slice(callback.body.start + 1, guarded.start);
+  const replacement = `(${text(ready.test)}||${text(scoped.test)})&&(${text(ready.test)}&&(__codexMcpThreadReadyPending=!0,${text(readyCapture)}),${text(assignment.left)}??=setTimeout(()=>{let __codexReady=__codexMcpThreadReadyPending;__codexMcpThreadReadyPending=!1;${callbackPrefix}${text(guarded.left)}&&(${light},__codexReady&&${text(inventory)},${text(mention)},${full})},${REFRESH_DELAY_MS})),${notification}.params.threadId==null&&(${text(ready.alternate)}),${text(scoped.alternate)}`;
   let next = source.slice(0, sequence.start) + replacement + source.slice(sequence.end);
   next = next.slice(0, fn.body.start+1) + "let __codexMcpThreadReadyPending=!1;" + next.slice(fn.body.start+1);
   validatePatchedSource(next);

@@ -4,8 +4,10 @@ const assert = require("node:assert/strict");
 const { MARKER, REFRESH_DELAY_MS, patchSource } = require("./patch-mcp-status-refresh");
 const { patchRspackSource } = require("./patch-mcp-status-refresh");
 
+const rspackFixture = 'function createHandler(e,t,C){let nH=!0,nF,nG,n9=new Set,n8=!1,n7=n=>{(0,nn.q)(e.queryClient,{queryKey:t0.qw,predicate:({queryKey:e})=>("installed-inventory"===e[1]||"installed"===e[1]&&n)&&e[2]===t},{cancelRefetch:!1})};return n=>{switch(n.method){case"mcpServer/startupStatus/updated":"ready"===n.params.status&&null!=n.params.threadId?(n8=n8||plugin(n.params.name),null==nF&&(nF=setTimeout(()=>{nF=void 0;let n=n8;n8=!1,nH&&(C?.()??!0)&&(n7(n),(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t,"mention-discovery"],refetchType:"active"},{cancelRefetch:!1}))},0))):"ready"===n.params.status&&n7(plugin(n.params.name)),null==n.params.threadId&&"starting"!==n.params.status?(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t]},{cancelRefetch:!1}):null!=n.params.threadId&&"starting"!==n.params.status&&(n9.add(n.params.threadId),null==nG&&(nG=setTimeout(()=>{nG=void 0;let n=n9;n9=new Set,nH&&(C?.()??!0)&&e.queryClient.invalidateQueries({queryKey:[...t1.ey,t,"thread"],predicate:({queryKey:e})=>{let t=e[t1.ey.length+2];return"string"==typeof t&&n.has(t)}})},0)));break}}}';
+
 test("Rspack 全局与 thread 通知共用250ms窗口，保留 inventory 累计和 thread 范围刷新", () => {
-  const source = 'function createHandler(e,t,C){let nH=!0,nF,nG,n9=new Set,n8=!1,n7=n=>{(0,nn.q)(e.queryClient,{queryKey:t0.qw,predicate:({queryKey:e})=>("installed-inventory"===e[1]||"installed"===e[1]&&n)&&e[2]===t},{cancelRefetch:!1})};return n=>{switch(n.method){case"mcpServer/startupStatus/updated":"ready"===n.params.status&&null!=n.params.threadId?(n8=n8||plugin(n.params.name),null==nF&&(nF=setTimeout(()=>{nF=void 0;let n=n8;n8=!1,nH&&(C?.()??!0)&&(n7(n),(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t,"mention-discovery"],refetchType:"active"},{cancelRefetch:!1}))},0))):"ready"===n.params.status&&n7(plugin(n.params.name)),null==n.params.threadId&&"starting"!==n.params.status?(0,nn.q)(e.queryClient,{queryKey:[...t1.ey,t]},{cancelRefetch:!1}):null!=n.params.threadId&&"starting"!==n.params.status&&(n9.add(n.params.threadId),null==nG&&(nG=setTimeout(()=>{nG=void 0;let n=n9;n9=new Set,nH&&(C?.()??!0)&&e.queryClient.invalidateQueries({queryKey:[...t1.ey,t,"thread"],predicate:({queryKey:e})=>{let t=e[t1.ey.length+2];return"string"==typeof t&&n.has(t)}})},0)));break}}}';
+  const source = rspackFixture;
   const result = patchRspackSource(source), calls = [], timers = [];
   const factory = Function("nn", "t0", "t1", "plugin", "setTimeout", `${result.source};return createHandler`)(
     { q: (client, filters) => calls.push(filters) }, { qw: ["plugins"] }, { ey: ["mcp"] }, name => name === "plugin",
@@ -28,6 +30,20 @@ test("Rspack 全局与 thread 通知共用250ms窗口，保留 inventory 累计�
   assert.equal(threads.predicate({ queryKey: ["mcp", "local", "thread", "thread-a"] }), true);
   assert.equal(threads.predicate({ queryKey: ["mcp", "local", "thread", "thread-b"] }), false);
   assert.equal(patchRspackSource(result.source).status, "already-patched");
+});
+
+test("Rspack 保留新版 inventory 防抖回调和卸载取消", () => {
+  const source = rspackFixture
+    .replace("};return n=>", "},deferred=debounce(()=>{let name=n8;n8=!1,nH&&(C?.()??!0)&&n7(name)},5e3);function dispose(){deferred.cancel()}return n=>")
+    .replace("nF=void 0;let n=n8;n8=!1,nH&&(C?.()??!0)&&(n7(n),", "nF=void 0,nH&&(C?.()??!0)&&(deferred(),");
+  const result = patchRspackSource(source);
+  assert.equal(result.status, "patched");
+  assert.match(result.source, /__codexReady&&deferred\(\)/);
+  assert.match(result.source, /function dispose\(\)\{deferred\.cancel\(\)\}/);
+  assert.match(result.source, /deferred=debounce\(\(\)=>\{let name=n8;n8=!1,nH&&\(C\?\.\(\)\?\?!0\)&&n7\(name\)\},5e3\)/);
+  assert.equal(patchRspackSource(result.source).status, "already-patched");
+  assert.throws(() => patchRspackSource(source.replace("&&n7(name)", "&&other(name)")), /inventory 防抖结构漂移/);
+  assert.throws(() => patchRspackSource(source.replace("deferred.cancel()", "deferred.flush()")), /inventory 防抖结构漂移/);
 });
 
 function fixture() {

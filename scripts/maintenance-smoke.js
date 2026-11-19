@@ -192,7 +192,6 @@ try {
   run("patch-hide-invite-menu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   run("patch-sidebar-usage.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   run("sidebar-usage-smoke.js", []);
-  run("patch-model-picker-submenu.js", ["win", "--check"], 1, { CODEX_PATCH_SOURCE_DIR: missingRequiredRoot });
   fs.writeFileSync(
     path.join(missingRequiredRoot, "win", "_asar", "webview", "assets", "archived-list.js"),
     "client.sendRequest(`thread/list`,{archived:!0,modelProviders:null});",
@@ -217,19 +216,6 @@ try {
   write(inviteFile, inviteSource.replace("onSelect:close", "changed:close"));
   run("patch-hide-invite-menu.js", ["win"], 1, inviteEnv);
   assert.equal(fs.readFileSync(inviteFile, "utf8"), inviteSource.replace("onSelect:close", "changed:close"));
-
-  const pickerRoot = path.join(temporary, "picker");
-  const pickerFile = path.join(pickerRoot, "win", "_asar", "webview", "assets", "model-picker.js");
-  const nativePicker = 'function picker(input){const {modelListConfig:list,menuView:view,onToggleMenuView:toggle}=input;const items=list.options.map(option=>ui.jsx(menu.Item,{"data-model-selected":option.selected,role:`menuitemradio`,onSelect:event=>{event.preventDefault();option.onSelect();toggle(`simple`)}}));return ui.jsx("div",{"data-model-picker-view":view,children:items});}';
-  write(pickerFile, nativePicker);
-  const nativeCheck = run("patch-model-picker-submenu.js", ["win", "--check"], 0, { CODEX_PATCH_SOURCE_DIR: pickerRoot });
-  assert.match(nativeCheck.stdout, /native inline model list verified/);
-  run("patch-model-picker-submenu.js", ["win"], 0, { CODEX_PATCH_SOURCE_DIR: pickerRoot });
-  assert.equal(fs.readFileSync(pickerFile, "utf8"), nativePicker);
-  write(pickerFile, nativePicker.replace("event.preventDefault();", ""));
-  run("patch-model-picker-submenu.js", ["win"], 1, { CODEX_PATCH_SOURCE_DIR: pickerRoot });
-  write(pickerFile, nativePicker.replace("ui.jsx(\"div\"", "ui.jsx(menu.FlyoutSubmenuItem"));
-  run("patch-model-picker-submenu.js", ["win"], 1, { CODEX_PATCH_SOURCE_DIR: pickerRoot });
 
   const candidate = path.join(temporary, "candidate");
   const zip = Buffer.from("synthetic ZIP payload for promotion checks");

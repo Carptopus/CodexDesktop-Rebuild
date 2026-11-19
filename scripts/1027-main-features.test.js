@@ -8,7 +8,6 @@ const { spawnSync } = require("node:child_process");
 const acorn = require("acorn");
 const worker = require("./patch-worker-limits");
 const cdp = require("./patch-cdp-screenshot");
-const sentry = require("./patch-sentry-scope");
 
 // 26.1027.6604.0 early-bootstrap-499 的真实 Worker 构造表达式。
 const workerExpression = "new eMg.Worker(r,{name:this.id,workerData:{...a,sentryRpcPort:n.port2,mainRpcPort:i?.port2??null},transferList:[n.port2,...null==i?[]:[i.port2]]})";
@@ -56,7 +55,7 @@ test("1027 CDP 包装返回值和超时语义保留，仅修改整页截图副�
 });
 
 const evidenceDir = process.env.CODEX_1027_SOURCE_EVIDENCE;
-test("1027 完整真实源：五项补丁两次运行、缺失和歧义拒绝", { skip: !evidenceDir }, () => {
+test("1027 完整真实源：四项补丁两次运行、缺失和歧义拒绝", { skip: !evidenceDir }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-1027-main-features-"));
   const build = path.join(root, "win", "_asar", ".vite", "build");
   fs.mkdirSync(build, { recursive: true });
@@ -65,33 +64,7 @@ test("1027 完整真实源：五项补丁两次运行、缺失和歧义拒绝", 
     return spawnSync(process.execPath, [path.join(__dirname, "patch-" + name + ".js"), "win"], { env: { ...process.env, CODEX_PATCH_SOURCE_DIR: root }, encoding: "utf8" });
   }
   try {
-    const sources = fs.readdirSync(build).filter((f) => f.endsWith(".js")).map((f) => fs.readFileSync(path.join(build, f), "utf8"));
-    assert.deepEqual(sentry.inspectNativeScopeProtection(sources), [{ moduleId: 72629, sanitizerModuleId: 39092, sanitizerName: "r7" }]);
-    assert.equal(sentry.inspectNativeScopeProtection(sources.map((source) => source.replace("beforeBreadcrumb:o.SKH", "beforeBreadcrumb:o.wrong"))).length, 0);
-    assert.equal(sentry.inspectNativeScopeProtection(sources.map((source) => source.replace("byteLength<=2048", "byteLength<=9999"))).length, 0);
-    const sanitizerSource = sources.find((source) => source.includes("codex_truncated_breadcrumb_data") && source.includes("SKH:()=>r7"));
-    const sanitizerAst = acorn.parse(sanitizerSource, { ecmaVersion: "latest" });
-    const functions = new Map();
-    function collect(node, inSanitizerModule = false) {
-      if (!node || typeof node !== "object") return;
-      if (node.type === "Property" && node.key?.value === 39092) inSanitizerModule = true;
-      if (inSanitizerModule && node.type === "FunctionDeclaration" && ["r7", "ot", "on"].includes(node.id.name)) functions.set(node.id.name, sanitizerSource.slice(node.start, node.end));
-      for (const value of Object.values(node)) {
-        if (Array.isArray(value)) value.forEach((child) => collect(child, inSanitizerModule));
-        else if (value?.type) collect(value, inSanitizerModule);
-      }
-    }
-    collect(sanitizerAst);
-    assert.equal(functions.size, 3);
-    const truncate = vm.runInNewContext([...functions.values()].join(";") + ";r7", { TextEncoder, r8: "[Truncated: breadcrumb data exceeded 2 KiB]" });
-    const small = { data: { message: "small" } };
-    assert.equal(truncate(small), small);
-    const large = { data: { arguments: "汉".repeat(5000), payload: "x".repeat(9000) } };
-    const trimmed = truncate(large);
-    assert.ok(new TextEncoder().encode(JSON.stringify(trimmed.data)).byteLength <= 2048);
-    assert.equal(trimmed.data.codex_truncated_breadcrumb_data, true);
-    assert.equal(large.data.payload.length, 9000);
-    for (const name of ["devtools", "worker-limits", "sentry-scope", "cdp-screenshot", "copyright"]) {
+    for (const name of ["devtools", "worker-limits", "cdp-screenshot", "copyright"]) {
       for (let pass = 0; pass < 2; pass++) {
         const result = run(name);
         assert.equal(result.status, 0, name + " " + result.stdout + result.stderr);
